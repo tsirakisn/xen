@@ -1,6 +1,7 @@
 #ifndef __ARCH_ARM_MM__
 #define __ARCH_ARM_MM__
 
+#include <xen/config.h>
 #include <xen/kernel.h>
 #include <asm/page.h>
 #include <public/xen.h>
@@ -32,12 +33,6 @@ struct page_info
         struct {
             /* Type reference count and various PGT_xxx flags and fields. */
             unsigned long type_info;
-            /*
-             * Reference count for page table used in the P2M code.
-             * The counter is protected by the p2m->lock of the
-             * associated domain.
-             */
-            unsigned long p2m_refcount;
         } inuse;
         /* Page is on a free list: ((count_info & PGC_count_mask) == 0). */
         struct {
@@ -128,7 +123,7 @@ extern vaddr_t xenheap_virt_start;
 #else
 #define is_xen_heap_page(page) ((page)->count_info & PGC_xen_heap)
 #define is_xen_heap_mfn(mfn) \
-    (mfn_valid(_mfn(mfn)) && is_xen_heap_page(__mfn_to_page(mfn)))
+    (mfn_valid(mfn) && is_xen_heap_page(__mfn_to_page(mfn)))
 #endif
 
 #define is_xen_fixed_mfn(mfn)                                   \
@@ -162,9 +157,9 @@ extern void setup_pagetables(unsigned long boot_phys_offset, paddr_t xen_paddr);
 extern void remove_early_mappings(void);
 /* Allocate and initialise pagetables for a secondary CPU. Sets init_ttbr to the
  * new page table */
-extern int init_secondary_pagetables(int cpu);
+extern int __cpuinit init_secondary_pagetables(int cpu);
 /* Switch secondary CPUS to its own pagetables and finalise MMU setup */
-extern void mmu_init_secondary_cpu(void);
+extern void __cpuinit mmu_init_secondary_cpu(void);
 /* Set up the xenheap: up to 1GB of contiguous, always-mapped memory.
  * Base must be 32MB aligned and size a multiple of 32MB. */
 extern void setup_xenheap_mappings(unsigned long base_mfn, unsigned long nr_mfns);
@@ -194,7 +189,7 @@ static inline void __iomem *ioremap_wc(paddr_t start, size_t len)
 
 /* XXX -- account for base */
 #define mfn_valid(mfn)        ({                                              \
-    unsigned long __m_f_n = mfn_x(mfn);                                       \
+    unsigned long __m_f_n = (mfn);                                            \
     likely(pfn_to_pdx(__m_f_n) >= frametable_base_pdx && __mfn_valid(__m_f_n)); \
 })
 
@@ -330,6 +325,7 @@ unsigned long domain_get_maximum_gpfn(struct domain *d);
 
 extern struct domain *dom_xen, *dom_io, *dom_cow;
 
+#define memguard_init(_s)              (_s)
 #define memguard_guard_stack(_p)       ((void)0)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)

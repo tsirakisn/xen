@@ -35,6 +35,7 @@
  */
 
 
+#include <xen/config.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
 #include <xen/err.h>
@@ -195,7 +196,21 @@ static inline int pci_for_each_dma_alias(struct pci_dev *pdev,
 #define PHYS_MASK_SHIFT		PADDR_BITS
 typedef paddr_t phys_addr_t;
 
+#ifdef CONFIG_ARM_64
+# define CONFIG_64BIT
+#endif
+
 #define VA_BITS		0	/* Only used for configuring stage-1 input size */
+
+/* The macro ACCESS_ONCE start to be replaced in Linux in favor of
+ * {READ, WRITE}_ONCE. Rather than introducing in the common code, keep a
+ * version here. We will have to drop it when the SMMU code in Linux will
+ * switch to {READ, WRITE}_ONCE.
+ */
+#define __ACCESS_ONCE(x) ({ \
+	 __maybe_unused typeof(x) __var = 0; \
+	(volatile typeof(x) *)&(x); })
+#define ACCESS_ONCE(x) (*__ACCESS_ONCE(x))
 
 #define MODULE_DEVICE_TABLE(type, name)
 #define module_param_named(name, value, type, perm)
@@ -2529,7 +2544,7 @@ static int force_stage = 2;
  */
 static u32 platform_features = ARM_SMMU_FEAT_COHERENT_WALK;
 
-static int __must_check arm_smmu_iotlb_flush_all(struct domain *d)
+static void arm_smmu_iotlb_flush_all(struct domain *d)
 {
 	struct arm_smmu_xen_domain *smmu_domain = dom_iommu(d)->arch.priv;
 	struct iommu_domain *cfg;
@@ -2546,16 +2561,13 @@ static int __must_check arm_smmu_iotlb_flush_all(struct domain *d)
 		arm_smmu_tlb_inv_context(cfg->priv);
 	}
 	spin_unlock(&smmu_domain->lock);
-
-	return 0;
 }
 
-static int __must_check arm_smmu_iotlb_flush(struct domain *d,
-                                             unsigned long gfn,
-                                             unsigned int page_count)
+static void arm_smmu_iotlb_flush(struct domain *d, unsigned long gfn,
+                                 unsigned int page_count)
 {
-	/* ARM SMMU v1 doesn't have flush by VMA and VMID */
-	return arm_smmu_iotlb_flush_all(d);
+    /* ARM SMMU v1 doesn't have flush by VMA and VMID */
+    arm_smmu_iotlb_flush_all(d);
 }
 
 static struct iommu_domain *arm_smmu_get_domain(struct domain *d,
@@ -2737,8 +2749,8 @@ static void arm_smmu_iommu_domain_teardown(struct domain *d)
 	xfree(xen_domain);
 }
 
-static int __must_check arm_smmu_map_page(struct domain *d, unsigned long gfn,
-			unsigned long mfn, unsigned int flags)
+static int arm_smmu_map_page(struct domain *d, unsigned long gfn,
+			     unsigned long mfn, unsigned int flags)
 {
 	p2m_type_t t;
 
@@ -2763,10 +2775,10 @@ static int __must_check arm_smmu_map_page(struct domain *d, unsigned long gfn,
 	 * The function guest_physmap_add_entry replaces the current mapping
 	 * if there is already one...
 	 */
-	return guest_physmap_add_entry(d, _gfn(gfn), _mfn(mfn), 0, t);
+	return guest_physmap_add_entry(d, gfn, mfn, 0, t);
 }
 
-static int __must_check arm_smmu_unmap_page(struct domain *d, unsigned long gfn)
+static int arm_smmu_unmap_page(struct domain *d, unsigned long gfn)
 {
 	/*
 	 * This function should only be used by gnttab code when the domain
@@ -2775,7 +2787,7 @@ static int __must_check arm_smmu_unmap_page(struct domain *d, unsigned long gfn)
 	if ( !is_domain_direct_mapped(d) )
 		return -EINVAL;
 
-	guest_physmap_remove_page(d, _gfn(gfn), _mfn(gfn), 0);
+	guest_physmap_remove_page(d, gfn, gfn, 0);
 
 	return 0;
 }

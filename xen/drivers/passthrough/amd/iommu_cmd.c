@@ -289,29 +289,35 @@ void amd_iommu_flush_iotlb(u8 devfn, const struct pci_dev *pdev,
     unsigned long flags;
     struct amd_iommu *iommu;
     unsigned int req_id, queueid, maxpend;
+    struct pci_ats_dev *ats_pdev;
 
     if ( !ats_enabled )
         return;
 
-    if ( !pci_ats_enabled(pdev->seg, pdev->bus, pdev->devfn) )
+    ats_pdev = get_ats_device(pdev->seg, pdev->bus, pdev->devfn);
+    if ( ats_pdev == NULL )
         return;
 
-    iommu = find_iommu_for_device(pdev->seg, PCI_BDF2(pdev->bus, pdev->devfn));
+    if ( !pci_ats_enabled(ats_pdev->seg, ats_pdev->bus, ats_pdev->devfn) )
+        return;
+
+    iommu = find_iommu_for_device(ats_pdev->seg,
+                                  PCI_BDF2(ats_pdev->bus, ats_pdev->devfn));
 
     if ( !iommu )
     {
         AMD_IOMMU_DEBUG("%s: Can't find iommu for %04x:%02x:%02x.%u\n",
-                        __func__, pdev->seg, pdev->bus,
-                        PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+                        __func__, ats_pdev->seg, ats_pdev->bus,
+                        PCI_SLOT(ats_pdev->devfn), PCI_FUNC(ats_pdev->devfn));
         return;
     }
 
     if ( !iommu_has_cap(iommu, PCI_CAP_IOTLB_SHIFT) )
         return;
 
-    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(pdev->bus, devfn));
+    req_id = get_dma_requestor_id(iommu->seg, PCI_BDF2(ats_pdev->bus, devfn));
     queueid = req_id;
-    maxpend = pdev->ats.queue_depth & 0xff;
+    maxpend = ats_pdev->ats_queue_depth & 0xff;
 
     /* send INVALIDATE_IOTLB_PAGES command */
     spin_lock_irqsave(&iommu->lock, flags);

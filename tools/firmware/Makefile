@@ -6,8 +6,12 @@ TARGET      := hvmloader/hvmloader
 INST_DIR := $(DESTDIR)$(XENFIRMWAREDIR)
 
 SUBDIRS-y :=
+ifeq ($(OVMF_PATH),)
 SUBDIRS-$(CONFIG_OVMF) += ovmf-dir
-SUBDIRS-$(CONFIG_SEABIOS) += seabios-dir
+endif
+ifeq ($(SEABIOS_PATH),)
+#SUBDIRS-$(CONFIG_SEABIOS) += seabios-dir
+endif
 SUBDIRS-$(CONFIG_ROMBIOS) += rombios
 SUBDIRS-$(CONFIG_ROMBIOS) += vgabios
 SUBDIRS-$(CONFIG_ROMBIOS) += etherboot
@@ -16,11 +20,11 @@ SUBDIRS-y += hvmloader
 LD32BIT-$(CONFIG_FreeBSD) := LD32BIT_FLAG=-melf_i386_fbsd
 
 ovmf-dir:
-	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
+	GIT="$(GIT)" $(XEN_ROOT)/scripts/git-checkout.sh $(OVMF_UPSTREAM_URL) $(OVMF_UPSTREAM_REVISION) ovmf-dir
 	cp ovmf-makefile ovmf-dir/Makefile;
 
 seabios-dir:
-	GIT=$(GIT) $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
+	GIT="$(GIT)" $(XEN_ROOT)/scripts/git-checkout.sh $(SEABIOS_UPSTREAM_URL) $(SEABIOS_UPSTREAM_REVISION) seabios-dir
 	$(MAKE) -C seabios-dir defconfig
 
 .PHONY: all
@@ -34,19 +38,13 @@ ifeq ($(CONFIG_ROMBIOS),y)
 	false ; \
 	fi
 endif
-	$(MAKE) $(LD32BIT-y) CC=$(CC) PYTHON=$(PYTHON) subdirs-$@
+	$(MAKE) $(LD32BIT-y) CC="$(CC)" PYTHON=$(PYTHON) subdirs-$@
 
 
 .PHONY: install
 install: all
 	[ -d $(INST_DIR) ] || $(INSTALL_DIR) $(INST_DIR)
 	[ ! -e $(TARGET) ] || $(INSTALL_DATA) $(TARGET) $(INST_DIR)
-ifeq ($(CONFIG_SEABIOS),y)
-	$(INSTALL_DATA) seabios-dir/out/bios.bin $(INST_DIR)/seabios.bin
-endif
-ifeq ($(CONFIG_OVMF),y)
-	$(INSTALL_DATA) ovmf-dir/ovmf.bin $(INST_DIR)/ovmf.bin
-endif
 
 .PHONY: clean
 clean: subdirs-clean

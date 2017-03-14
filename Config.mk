@@ -1,8 +1,8 @@
 # -*- mode: Makefile; -*-
 
-ifeq ($(filter /%,$(XEN_ROOT)),)
-$(error XEN_ROOT must be absolute)
-endif
+#ifeq ($(filter /%,$(XEN_ROOT)),)
+#$(error XEN_ROOT must be absolute)
+#endif
 
 # Convenient variables
 comma   := ,
@@ -15,6 +15,13 @@ realpath = $(wildcard $(foreach file,$(1),$(shell cd -P $(dir $(file)) && echo "
 or       = $(if $(strip $(1)),$(1),$(if $(strip $(2)),$(2),$(if $(strip $(3)),$(3),$(if $(strip $(4)),$(4)))))
 
 -include $(XEN_ROOT)/.config
+
+# A debug build of Xen and tools?
+debug ?= n
+debug_symbols ?= $(debug)
+
+# Test coverage support
+coverage ?= n
 
 XEN_COMPILE_ARCH    ?= $(shell uname -m | sed -e s/i.86/x86_32/ \
                          -e s/i86pc/x86_32/ -e s/amd64/x86_64/ \
@@ -29,7 +36,8 @@ CONFIG_$(XEN_OS) := y
 SHELL     ?= /bin/sh
 
 # Tools to run on system hosting the build
-HOSTCFLAGS  = -Wall -Werror -Wstrict-prototypes -O2 -fomit-frame-pointer
+HOSTCC      = gcc
+HOSTCFLAGS  = -Wall -Werror -Wstrict-prototypes  -fomit-frame-pointer
 HOSTCFLAGS += -fno-strict-aliasing
 
 DISTDIR     ?= $(XEN_ROOT)/dist
@@ -38,22 +46,12 @@ DESTDIR     ?= /
 # Allow phony attribute to be listed as dependency rather than fake target
 .PHONY: .phony
 
-# If we are not cross-compiling, default HOSTC{C/XX} to C{C/XX}
-ifeq ($(XEN_TARGET_ARCH), $(XEN_COMPILE_ARCH))
-HOSTCC ?= $(CC)
-HOSTCXX ?= $(CXX)
-endif
-
 # Use Clang/LLVM instead of GCC?
 clang ?= n
 ifeq ($(clang),n)
 gcc := y
-HOSTCC ?= gcc
-HOSTCXX ?= g++
 else
 gcc := n
-HOSTCC ?= clang
-HOSTCXX ?= clang++
 endif
 
 
@@ -108,54 +106,30 @@ endef
 
 cc-options-add = $(foreach o,$(3),$(call cc-option-add,$(1),$(2),$(o)))
 
-# cc-ver: Check compiler against the version requirement. Return boolean 'y'/'n'.
-# Usage: ifeq ($(call cc-ver,$(CC),ge,0x030400),y)
+# cc-ver: Check compiler is at least specified version. Return boolean 'y'/'n'.
+# Usage: ifeq ($(call cc-ver,$(CC),0x030400),y)
 cc-ver = $(shell if [ $$((`$(1) -dumpversion | awk -F. \
-           '{ printf "0x%02x%02x%02x", $$1, $$2, $$3}'`)) -$(2) $$(($(3))) ]; \
+           '{ printf "0x%02x%02x%02x", $$1, $$2, $$3}'`)) -ge $$(($(2))) ]; \
            then echo y; else echo n; fi ;)
 
 # cc-ver-check: Check compiler is at least specified version, else fail.
 # Usage: $(call cc-ver-check,CC,0x030400,"Require at least gcc-3.4")
 cc-ver-check = $(eval $(call cc-ver-check-closure,$(1),$(2),$(3)))
 define cc-ver-check-closure
-    ifeq ($$(call cc-ver,$$($(1)),ge,$(2)),n)
+    ifeq ($$(call cc-ver,$$($(1)),$(2)),n)
         override $(1) = echo "*** FATAL BUILD ERROR: "$(3) >&2; exit 1;
         cc-option := n
     endif
 endef
 
-# cc-ifversion: Check compiler version and take branch accordingly
-# Usage $(call cc-ifversion,lt,0x040700,string_if_y,string_if_n)
-cc-ifversion = $(shell [ $(call cc-ver,$(CC),$(1),$(2)) = "y" ] \
-				&& echo $(3) || echo $(4))
-
 # Require GCC v4.1+
 check-$(gcc) = $(call cc-ver-check,CC,0x040100,"Xen requires at least gcc-4.1")
 $(eval $(check-y))
 
-ld-ver-build-id = $(shell $(1) --build-id 2>&1 | \
-					grep -q build-id && echo n || echo y)
-
-export XEN_HAS_BUILD_ID ?= n
-ifeq ($(call ld-ver-build-id,$(LD)),n)
-build_id_linker :=
-else
-CFLAGS += -DBUILD_ID
-export XEN_HAS_BUILD_ID=y
-build_id_linker := --build-id=sha1
-endif
-
-ifndef XEN_HAS_CHECKPOLICY
-    CHECKPOLICY ?= checkpolicy
-    XEN_HAS_CHECKPOLICY := $(shell $(CHECKPOLICY) -h 2>&1 | grep -q xen && echo y || echo n)
-    export XEN_HAS_CHECKPOLICY
-endif
-
 # as-insn: Check whether assembler supports an instruction.
 # Usage: cflags-y += $(call as-insn "insn",option-yes,option-no)
 as-insn = $(if $(shell echo 'void _(void) { asm volatile ( $(2) ); }' \
-                       | $(1) $(filter-out -M% %.d -include %/include/xen/config.h,$(AFLAGS)) \
-                              -c -x c -o /dev/null - 2>&1),$(4),$(3))
+                       | $(1) -c -x c -o /dev/null - 2>&1),$(4),$(3))
 
 # as-insn-check: Add an option to compilation flags, but only if insn is
 #                supported by assembler.
@@ -185,8 +159,7 @@ endef
 
 BUILD_MAKE_VARS := sbindir bindir LIBEXEC LIBEXEC_BIN libdir SHAREDIR \
                    XENFIRMWAREDIR XEN_CONFIG_DIR XEN_SCRIPT_DIR XEN_LOCK_DIR \
-                   XEN_RUN_DIR XEN_PAGING_DIR XEN_DUMP_DIR XEN_LOG_DIR \
-                   XEN_LIB_DIR XEN_RUN_STORED
+                   XEN_RUN_DIR XEN_PAGING_DIR XEN_DUMP_DIR
 
 buildmakevars2file = $(eval $(call buildmakevars2file-closure,$(1)))
 define buildmakevars2file-closure
@@ -206,11 +179,20 @@ define buildmakevars2header-closure
 	$(call move-if-changed,$(1).tmp,$(1))
 endef
 
+ifeq ($(debug_symbols),y)
+CFLAGS += -g
+endif
+
 CFLAGS += -fno-strict-aliasing
 
 CFLAGS += -std=gnu99
 
 CFLAGS += -Wall -Wstrict-prototypes
+
+# Clang complains about macros that expand to 'if ( ( foo == bar ) ) ...'
+# and is over-zealous with the printf format lint
+# and is a bit too fierce about unused return values
+CFLAGS-$(clang) += -Wno-parentheses -Wno-format -Wno-unused-value
 
 $(call cc-option-add,HOSTCFLAGS,HOSTCC,-Wdeclaration-after-statement)
 $(call cc-option-add,CFLAGS,CC,-Wdeclaration-after-statement)
@@ -229,6 +211,10 @@ APPEND_CFLAGS += $(foreach i, $(APPEND_INCLUDES), -I$(i))
 
 EMBEDDED_EXTRA_CFLAGS := -nopie -fno-stack-protector -fno-stack-protector-all
 EMBEDDED_EXTRA_CFLAGS += -fno-exceptions
+
+# Enable XSM security module (by default, Flask).
+XSM_ENABLE ?= n
+FLASK_ENABLE ?= $(XSM_ENABLE)
 
 XEN_EXTFILES_URL ?= http://xenbits.xen.org/xen-extfiles
 # All the files at that location were downloaded from elsewhere on
@@ -267,22 +253,24 @@ QEMU_TRADITIONAL_URL ?= git://xenbits.xen.org/qemu-xen-traditional.git
 SEABIOS_UPSTREAM_URL ?= git://xenbits.xen.org/seabios.git
 MINIOS_UPSTREAM_URL ?= git://xenbits.xen.org/mini-os.git
 endif
-OVMF_UPSTREAM_REVISION ?= 5734d486b6aa0b69a39b2c8d52b355400bcf2551
-QEMU_UPSTREAM_REVISION ?= master
-MINIOS_UPSTREAM_REVISION ?= ca013fa9baf92f47469ba1f2e1aaa31c41d8a0bb
-# Tue Dec 13 15:02:02 2016 +0000
-# build: prepend OBJ_DIR to linker script
+OVMF_UPSTREAM_REVISION ?= 52a99493cce88a9d4ec8a02d7f1bd1a1001ce60d
+QEMU_UPSTREAM_REVISION ?= qemu-xen-4.6.4
+# Wed Sep 16 17:38:44 2015 +0200
+# trace: remove malloc tracing
+MINIOS_UPSTREAM_REVISION ?= xen-RELEASE-4.6.4
+# Fri May 13 15:21:10 2016 +0100
+# lib/sys.c: enclose file_types in define guards
 
-SEABIOS_UPSTREAM_REVISION ?= rel-1.10.0
-# Wed Jun 22 14:53:24 2016 +0800
-# fw/msr_feature_control: add support to set MSR_IA32_FEATURE_CONTROL
+SEABIOS_UPSTREAM_REVISION ?= rel-1.8.2
+# Tue Mar 17 10:52:16 2015 -0400
+# vgabios: On bda_save_restore() the saved vbe_mode also has flags in it
 
 ETHERBOOT_NICS ?= rtl8139 8086100e
 
 
-QEMU_TRADITIONAL_REVISION ?= 8b4834ee1202852ed83a9fc61268c65fb6961ea7
-# Wed Feb 22 11:00:38 2017 +0000
-# Request compatibility interface for device model operations
+QEMU_TRADITIONAL_REVISION ?= xen-4.6.4
+# Tue Jul 26 15:31:59 2016 +0100
+# virtio: error out if guest exceeds virtqueue size
 
 # Specify which qemu-dm to use. This may be `ioemu' to use the old
 # Mercurial in-tree version, or a local directory, or a git URL.

@@ -16,6 +16,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/types.h>
@@ -39,7 +40,7 @@ ENTRY(vmx_asm_vmexit_handler)
         push %r10
         push %r11
         push %rbx
-        GET_CURRENT(bx)
+        GET_CURRENT(%rbx)
         push %rbp
         push %r12
         push %r13
@@ -109,10 +110,10 @@ UNLIKELY_END(realmode)
         sti
         SAVE_ALL
         call vmx_vmentry_failure
-        BUG  /* vmx_vmentry_failure() shouldn't return. */
+        ud2
 
 ENTRY(vmx_asm_do_vmentry)
-        GET_CURRENT(bx)
+        GET_CURRENT(%rbx)
         jmp  .Lvmx_do_vmentry
 
 .Lvmx_goto_emulator:

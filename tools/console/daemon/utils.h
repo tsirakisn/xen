@@ -23,7 +23,6 @@
 #include <stdbool.h>
 #include <syslog.h>
 #include <stdio.h>
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
 
 #include <xenstore.h>

@@ -7,6 +7,7 @@
  * Version 2 or later.  See the file COPYING for more details.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -17,6 +18,12 @@ static void evtchn_2l_set_pending(struct vcpu *v, struct evtchn *evtchn)
 {
     struct domain *d = v->domain;
     unsigned int port = evtchn->port;
+
+    /* if domain is in S3 it will miss the notification, so check here */
+    if (d->arch.hvm_domain.is_s3_suspended) {
+        return;
+    }
+
 
     /*
      * The following bit operations must happen in strict order.

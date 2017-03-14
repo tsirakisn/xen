@@ -16,7 +16,7 @@ struct dev_archdata {
 struct device
 {
     enum device_type type;
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef HAS_DEVICE_TREE
     struct dt_device_node *of_node; /* Used by drivers imported from Linux */
 #endif
     struct dev_archdata archdata;
@@ -50,27 +50,6 @@ struct device_desc {
     int (*init)(struct dt_device_node *dev, const void *data);
 };
 
-struct acpi_device_desc {
-    /* Device name */
-    const char *name;
-    /* Device class */
-    enum device_class class;
-    /* type of device supported by the driver */
-    const int class_type;
-    /* Device initialization */
-    int (*init)(const void *data);
-};
-
-/**
- *  acpi_device_init - Initialize a device
- *  @class: class of the device (serial, network...)
- *  @data: specific data for initializing the device
- *
- *  Return 0 on success.
- */
-int __init acpi_device_init(enum device_class class,
-                            const void *data, int class_type);
-
 /**
  *  device_init - Initialize a device
  *  @dev: device to initialize
@@ -97,15 +76,6 @@ __section(".dev.info") = {                                          \
     .class = _class,                                                \
 
 #define DT_DEVICE_END                                               \
-};
-
-#define ACPI_DEVICE_START(_name, _namestr, _class)                    \
-static const struct acpi_device_desc __dev_desc_##_name __used           \
-__section(".adev.info") = {                       \
-    .name = _namestr,                                               \
-    .class = _class,                                                \
-
-#define ACPI_DEVICE_END                                               \
 };
 
 #endif /* __ASM_ARM_DEVICE_H */

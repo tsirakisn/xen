@@ -1,6 +1,7 @@
 #ifndef __ARM_STRING_H__
 #define __ARM_STRING_H__
 
+#include <xen/config.h>
 
 /*
  * We don't do inline string functions, since the

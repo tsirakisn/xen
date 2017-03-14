@@ -18,6 +18,7 @@
  */
 
 #include <xen/bitops.h>
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/softirq.h>
@@ -67,49 +68,6 @@ static void vgic_init_pending_irq(struct pending_irq *p, unsigned int virq)
     p->irq = virq;
 }
 
-static void vgic_rank_init(struct vgic_irq_rank *rank, uint8_t index,
-                           unsigned int vcpu)
-{
-    unsigned int i;
-
-    /*
-     * Make sure that the type chosen to store the target is able to
-     * store an VCPU ID between 0 and the maximum of virtual CPUs
-     * supported.
-     */
-    BUILD_BUG_ON((1 << (sizeof(rank->vcpu[0]) * 8)) < MAX_VIRT_CPUS);
-
-    spin_lock_init(&rank->lock);
-
-    rank->index = index;
-
-    for ( i = 0; i < NR_INTERRUPT_PER_RANK; i++ )
-        write_atomic(&rank->vcpu[i], vcpu);
-}
-
-int domain_vgic_register(struct domain *d, int *mmio_count)
-{
-    switch ( d->arch.vgic.version )
-    {
-#ifdef CONFIG_HAS_GICV3
-    case GIC_V3:
-        if ( vgic_v3_init(d, mmio_count) )
-           return -ENODEV;
-        break;
-#endif
-    case GIC_V2:
-        if ( vgic_v2_init(d, mmio_count) )
-            return -ENODEV;
-        break;
-    default:
-        printk(XENLOG_G_ERR "d%d: Unknown vGIC version %u\n",
-               d->domain_id, d->arch.vgic.version);
-        return -ENODEV;
-    }
-
-    return 0;
-}
-
 int domain_vgic_init(struct domain *d, unsigned int nr_spis)
 {
     int i;
@@ -122,6 +80,24 @@ int domain_vgic_init(struct domain *d, unsigned int nr_spis)
         return -EINVAL;
 
     d->arch.vgic.nr_spis = nr_spis;
+
+    switch ( d->arch.vgic.version )
+    {
+#ifdef HAS_GICV3
+    case GIC_V3:
+        if ( vgic_v3_init(d) )
+           return -ENODEV;
+        break;
+#endif
+    case GIC_V2:
+        if ( vgic_v2_init(d) )
+            return -ENODEV;
+        break;
+    default:
+        printk(XENLOG_G_ERR "d%d: Unknown vGIC version %u\n",
+               d->domain_id, d->arch.vgic.version);
+        return -ENODEV;
+    }
 
     spin_lock_init(&d->arch.vgic.lock);
 
@@ -138,9 +114,8 @@ int domain_vgic_init(struct domain *d, unsigned int nr_spis)
     for (i=0; i<d->arch.vgic.nr_spis; i++)
         vgic_init_pending_irq(&d->arch.vgic.pending_irqs[i], i + 32);
 
-    /* SPIs are routed to VCPU0 by default */
-    for ( i = 0; i < DOMAIN_NR_RANKS(d); i++ )
-        vgic_rank_init(&d->arch.vgic.shared_irqs[i], i + 1, 0);
+    for (i=0; i<DOMAIN_NR_RANKS(d); i++)
+        spin_lock_init(&d->arch.vgic.shared_irqs[i].lock);
 
     ret = d->arch.vgic.handler->domain_init(d);
     if ( ret )
@@ -181,7 +156,6 @@ void domain_vgic_free(struct domain *d)
         }
     }
 
-    d->arch.vgic.handler->domain_free(d);
     xfree(d->arch.vgic.shared_irqs);
     xfree(d->arch.vgic.pending_irqs);
     xfree(d->arch.vgic.allocated_irqs);
@@ -195,8 +169,7 @@ int vcpu_vgic_init(struct vcpu *v)
     if ( v->arch.vgic.private_irqs == NULL )
       return -ENOMEM;
 
-    /* SGIs/PPIs are always routed to this VCPU */
-    vgic_rank_init(v->arch.vgic.private_irqs, 0, v->vcpu_id);
+    spin_lock_init(&v->arch.vgic.private_irqs->lock);
 
     v->domain->arch.vgic.handler->vcpu_init(v);
 
@@ -217,24 +190,18 @@ int vcpu_vgic_free(struct vcpu *v)
     return 0;
 }
 
-struct vcpu *vgic_get_target_vcpu(struct vcpu *v, unsigned int virq)
+/* takes the rank lock */
+struct vcpu *vgic_get_target_vcpu(struct vcpu *v, unsigned int irq)
 {
-    struct vgic_irq_rank *rank = vgic_rank_irq(v, virq);
-    int target = read_atomic(&rank->vcpu[virq & INTERRUPT_RANK_MASK]);
-    return v->domain->vcpu[target];
-}
-
-static int vgic_get_virq_priority(struct vcpu *v, unsigned int virq)
-{
-    struct vgic_irq_rank *rank = vgic_rank_irq(v, virq);
+    struct domain *d = v->domain;
+    struct vcpu *v_target;
+    struct vgic_irq_rank *rank = vgic_rank_irq(v, irq);
     unsigned long flags;
-    int priority;
 
     vgic_lock_rank(v, rank, flags);
-    priority = rank->priority[virq & INTERRUPT_RANK_MASK];
+    v_target = d->arch.vgic.handler->get_target_vcpu(v, irq);
     vgic_unlock_rank(v, rank, flags);
-
-    return priority;
+    return v_target;
 }
 
 void vgic_migrate_irq(struct vcpu *old, struct vcpu *new, unsigned int irq)
@@ -299,6 +266,7 @@ void arch_move_irqs(struct vcpu *v)
 
 void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
 {
+    struct domain *d = v->domain;
     const unsigned long mask = r;
     struct pending_irq *p;
     unsigned int irq;
@@ -308,7 +276,7 @@ void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
         irq = i + (32 * n);
-        v_target = vgic_get_target_vcpu(v, irq);
+        v_target = d->arch.vgic.handler->get_target_vcpu(v, irq);
         p = irq_to_pending(v_target, irq);
         clear_bit(GIC_IRQ_GUEST_ENABLED, &p->status);
         gic_remove_from_queues(v_target, irq);
@@ -322,35 +290,19 @@ void vgic_disable_irqs(struct vcpu *v, uint32_t r, int n)
     }
 }
 
-#define VGIC_ICFG_MASK(intr) (1 << ((2 * ((intr) % 16)) + 1))
-
-/* The function should be called with the rank lock taken */
-static inline unsigned int vgic_get_virq_type(struct vcpu *v, int n, int index)
-{
-    struct vgic_irq_rank *r = vgic_get_rank(v, n);
-    uint32_t tr = r->icfg[index >> 4];
-
-    ASSERT(spin_is_locked(&r->lock));
-
-    if ( tr & VGIC_ICFG_MASK(index) )
-        return IRQ_TYPE_EDGE_RISING;
-    else
-        return IRQ_TYPE_LEVEL_HIGH;
-}
-
 void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
 {
+    struct domain *d = v->domain;
     const unsigned long mask = r;
     struct pending_irq *p;
     unsigned int irq;
     unsigned long flags;
     int i = 0;
     struct vcpu *v_target;
-    struct domain *d = v->domain;
 
     while ( (i = find_next_bit(&mask, 32, i)) < 32 ) {
         irq = i + (32 * n);
-        v_target = vgic_get_target_vcpu(v, irq);
+        v_target = d->arch.vgic.handler->get_target_vcpu(v, irq);
         p = irq_to_pending(v_target, irq);
         set_bit(GIC_IRQ_GUEST_ENABLED, &p->status);
         spin_lock_irqsave(&v_target->arch.vgic.lock, flags);
@@ -361,13 +313,6 @@ void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
         {
             irq_set_affinity(p->desc, cpumask_of(v_target->processor));
             spin_lock_irqsave(&p->desc->lock, flags);
-            /*
-             * The irq cannot be a PPI, we only support delivery of SPIs
-             * to guests.
-             */
-            ASSERT(irq >= 32);
-            if ( irq_type_set_by_domain(d) )
-                gic_set_irq_type(p->desc, vgic_get_virq_type(v, n, i));
             p->desc->handler->enable(p->desc);
             spin_unlock_irqrestore(&p->desc->lock, flags);
         }
@@ -375,8 +320,8 @@ void vgic_enable_irqs(struct vcpu *v, uint32_t r, int n)
     }
 }
 
-bool vgic_to_sgi(struct vcpu *v, register_t sgir, enum gic_sgi_mode irqmode,
-                 int virq, const struct sgi_target *target)
+int vgic_to_sgi(struct vcpu *v, register_t sgir, enum gic_sgi_mode irqmode, int virq,
+                const struct sgi_target *target)
 {
     struct domain *d = v->domain;
     int vcpuid;
@@ -422,10 +367,10 @@ bool vgic_to_sgi(struct vcpu *v, register_t sgir, enum gic_sgi_mode irqmode,
         gprintk(XENLOG_WARNING,
                 "vGICD:unhandled GICD_SGIR write %"PRIregister" \
                  with wrong mode\n", sgir);
-        return false;
+        return 0;
     }
 
-    return true;
+    return 1;
 }
 
 struct pending_irq *irq_to_pending(struct vcpu *v, unsigned int irq)
@@ -462,11 +407,14 @@ void vgic_clear_pending_irqs(struct vcpu *v)
 void vgic_vcpu_inject_irq(struct vcpu *v, unsigned int virq)
 {
     uint8_t priority;
+    struct vgic_irq_rank *rank = vgic_rank_irq(v, virq);
     struct pending_irq *iter, *n = irq_to_pending(v, virq);
     unsigned long flags;
-    bool running;
+    bool_t running;
 
-    priority = vgic_get_virq_priority(v, virq);
+    vgic_lock_rank(v, rank, flags);
+    priority = v->domain->arch.vgic.handler->get_irq_priority(v, virq);
+    vgic_unlock_rank(v, rank, flags);
 
     spin_lock_irqsave(&v->arch.vgic.lock, flags);
 
@@ -528,24 +476,24 @@ void arch_evtchn_inject(struct vcpu *v)
     vgic_vcpu_inject_irq(v, v->domain->arch.evtchn_irq);
 }
 
-bool vgic_emulate(struct cpu_user_regs *regs, union hsr hsr)
+int vgic_emulate(struct cpu_user_regs *regs, union hsr hsr)
 {
     struct vcpu *v = current;
 
-    ASSERT(v->domain->arch.vgic.handler->emulate_reg != NULL);
+    ASSERT(v->domain->arch.vgic.handler->emulate_sysreg != NULL);
 
-    return v->domain->arch.vgic.handler->emulate_reg(regs, hsr);
+    return v->domain->arch.vgic.handler->emulate_sysreg(regs, hsr);
 }
 
-bool vgic_reserve_virq(struct domain *d, unsigned int virq)
+bool_t vgic_reserve_virq(struct domain *d, unsigned int virq)
 {
     if ( virq >= vgic_num_irqs(d) )
-        return false;
+        return 0;
 
     return !test_and_set_bit(virq, d->arch.vgic.allocated_irqs);
 }
 
-int vgic_allocate_virq(struct domain *d, bool spi)
+int vgic_allocate_virq(struct domain *d, bool_t spi)
 {
     int first, end;
     unsigned int virq;

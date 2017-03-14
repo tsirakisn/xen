@@ -2,8 +2,7 @@
  * kernel.c
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>

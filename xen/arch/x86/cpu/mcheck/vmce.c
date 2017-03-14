@@ -110,16 +110,15 @@ static int bank_mce_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
     case MSR_IA32_MC0_CTL:
         /* stick all 1's to MCi_CTL */
         *val = ~0UL;
-        mce_printk(MCE_VERBOSE, "MCE: %pv: rd MC%u_CTL %#"PRIx64"\n",
-                   v, bank, *val);
+        mce_printk(MCE_VERBOSE, "MCE: rd MC%u_CTL %#"PRIx64"\n", bank, *val);
         break;
     case MSR_IA32_MC0_STATUS:
         if ( bank < GUEST_MC_BANK_NUM )
         {
             *val = v->arch.vmce.bank[bank].mci_status;
             if ( *val )
-                mce_printk(MCE_VERBOSE, "MCE: %pv: rd MC%u_STATUS %#"PRIx64"\n",
-                           v, bank, *val);
+                mce_printk(MCE_VERBOSE, "MCE: rd MC%u_STATUS %#"PRIx64"\n",
+                           bank, *val);
         }
         break;
     case MSR_IA32_MC0_ADDR:
@@ -127,8 +126,8 @@ static int bank_mce_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         {
             *val = v->arch.vmce.bank[bank].mci_addr;
             if ( *val )
-                mce_printk(MCE_VERBOSE, "MCE: %pv: rd MC%u_ADDR %#"PRIx64"\n",
-                           v, bank, *val);
+                mce_printk(MCE_VERBOSE, "MCE: rd MC%u_ADDR %#"PRIx64"\n",
+                           bank, *val);
         }
         break;
     case MSR_IA32_MC0_MISC:
@@ -136,8 +135,8 @@ static int bank_mce_rdmsr(const struct vcpu *v, uint32_t msr, uint64_t *val)
         {
             *val = v->arch.vmce.bank[bank].mci_misc;
             if ( *val )
-                mce_printk(MCE_VERBOSE, "MCE: %pv: rd MC%u_MISC %#"PRIx64"\n",
-                           v, bank, *val);
+                mce_printk(MCE_VERBOSE, "MCE: rd MC%u_MISC %#"PRIx64"\n",
+                           bank, *val);
         }
         break;
     default:
@@ -179,16 +178,16 @@ int vmce_rdmsr(uint32_t msr, uint64_t *val)
         *val = cur->arch.vmce.mcg_status;
         if (*val)
             mce_printk(MCE_VERBOSE,
-                       "MCE: %pv: rd MCG_STATUS %#"PRIx64"\n", cur, *val);
+                       "MCE: rd MCG_STATUS %#"PRIx64"\n", *val);
         break;
     case MSR_IA32_MCG_CAP:
         *val = cur->arch.vmce.mcg_cap;
-        mce_printk(MCE_VERBOSE, "MCE: %pv: rd MCG_CAP %#"PRIx64"\n", cur, *val);
+        mce_printk(MCE_VERBOSE, "MCE: rd MCG_CAP %#"PRIx64"\n", *val);
         break;
     case MSR_IA32_MCG_CTL:
         if ( cur->arch.vmce.mcg_cap & MCG_CTL_P )
             *val = ~0ULL;
-        mce_printk(MCE_VERBOSE, "MCE: %pv: rd MCG_CTL %#"PRIx64"\n", cur, *val);
+        mce_printk(MCE_VERBOSE, "MCE: rd MCG_CTL %#"PRIx64"\n", *val);
         break;
     default:
         ret = mce_bank_msr(cur, msr) ? bank_mce_rdmsr(cur, msr, val) : 0;
@@ -218,24 +217,21 @@ static int bank_mce_wrmsr(struct vcpu *v, uint32_t msr, uint64_t val)
          */
         break;
     case MSR_IA32_MC0_STATUS:
-        mce_printk(MCE_VERBOSE, "MCE: %pv: wr MC%u_STATUS %#"PRIx64"\n",
-                   v, bank, val);
+        mce_printk(MCE_VERBOSE, "MCE: wr MC%u_STATUS %#"PRIx64"\n", bank, val);
         if ( val )
             ret = -1;
         else if ( bank < GUEST_MC_BANK_NUM )
             v->arch.vmce.bank[bank].mci_status = val;
         break;
     case MSR_IA32_MC0_ADDR:
-        mce_printk(MCE_VERBOSE, "MCE: %pv: wr MC%u_ADDR %#"PRIx64"\n",
-                   v, bank, val);
+        mce_printk(MCE_VERBOSE, "MCE: wr MC%u_ADDR %#"PRIx64"\n", bank, val);
         if ( val )
             ret = -1;
         else if ( bank < GUEST_MC_BANK_NUM )
             v->arch.vmce.bank[bank].mci_addr = val;
         break;
     case MSR_IA32_MC0_MISC:
-        mce_printk(MCE_VERBOSE, "MCE: %pv: wr MC%u_MISC %#"PRIx64"\n",
-                   v, bank, val);
+        mce_printk(MCE_VERBOSE, "MCE: wr MC%u_MISC %#"PRIx64"\n", bank, val);
         if ( val )
             ret = -1;
         else if ( bank < GUEST_MC_BANK_NUM )
@@ -279,8 +275,7 @@ int vmce_wrmsr(uint32_t msr, uint64_t val)
         break;
     case MSR_IA32_MCG_STATUS:
         cur->arch.vmce.mcg_status = val;
-        mce_printk(MCE_VERBOSE, "MCE: %pv: wr MCG_STATUS %"PRIx64"\n",
-                   cur, val);
+        mce_printk(MCE_VERBOSE, "MCE: wr MCG_STATUS %"PRIx64"\n", val);
         break;
     case MSR_IA32_MCG_CAP:
         /*
@@ -288,7 +283,7 @@ int vmce_wrmsr(uint32_t msr, uint64_t val)
          * the effect of writing to the IA32_MCG_CAP is undefined. Here we
          * treat writing as 'write not change'. Guest would not surprise.
          */
-        mce_printk(MCE_VERBOSE, "MCE: %pv: MCG_CAP is r/o\n", cur);
+        mce_printk(MCE_VERBOSE, "MCE: MCG_CAP is r/o\n");
         break;
     default:
         ret = mce_bank_msr(cur, msr) ? bank_mce_wrmsr(cur, msr, val) : 0;
@@ -386,64 +381,36 @@ int inject_vmce(struct domain *d, int vcpu)
     return ret;
 }
 
-static int vcpu_fill_mc_msrs(struct vcpu *v, uint64_t mcg_status,
-                             uint64_t mci_status, uint64_t mci_addr,
-                             uint64_t mci_misc)
-{
-    if ( v->arch.vmce.mcg_status & MCG_STATUS_MCIP )
-    {
-        mce_printk(MCE_QUIET, "MCE: %pv: guest has not handled previous"
-                   " vMCE yet!\n", v);
-        return -EBUSY;
-    }
-
-    spin_lock(&v->arch.vmce.lock);
-
-    v->arch.vmce.mcg_status = mcg_status;
-    /*
-     * 1. Skip bank 0 to avoid 'bank 0 quirk' of old processors
-     * 2. Filter MCi_STATUS MSCOD model specific error code to guest
-     */
-    v->arch.vmce.bank[1].mci_status = mci_status & MCi_STATUS_MSCOD_MASK;
-    v->arch.vmce.bank[1].mci_addr = mci_addr;
-    v->arch.vmce.bank[1].mci_misc = mci_misc;
-
-    spin_unlock(&v->arch.vmce.lock);
-
-    return 0;
-}
-
 int fill_vmsr_data(struct mcinfo_bank *mc_bank, struct domain *d,
-                   uint64_t gstatus, bool broadcast)
+                   uint64_t gstatus)
 {
     struct vcpu *v = d->vcpu[0];
-    int ret, err;
 
-    if ( mc_bank->mc_domid == DOMID_INVALID )
-        return -EINVAL;
-
-    /*
-     * vMCE with the actual error information is injected to vCPU0,
-     * and, if broadcast is required, we choose to inject less severe
-     * vMCEs to other vCPUs. Thus guest can always get the severest
-     * error (i.e. the actual one) on vCPU0. If guest can recover from
-     * the severest error on vCPU0, the less severe errors on other
-     * vCPUs will not prevent guest from recovering on those vCPUs.
-     */
-    ret = vcpu_fill_mc_msrs(v, gstatus, mc_bank->mc_status,
-                            mc_bank->mc_addr, mc_bank->mc_misc);
-    if ( broadcast )
-        for_each_vcpu ( d, v )
+    if ( mc_bank->mc_domid != (uint16_t)~0 )
+    {
+        if ( v->arch.vmce.mcg_status & MCG_STATUS_MCIP )
         {
-            if ( !v->vcpu_id )
-                continue;
-            err = vcpu_fill_mc_msrs(v, MCG_STATUS_MCIP | MCG_STATUS_RIPV,
-                                    0, 0, 0);
-            if ( err )
-                ret = err;
+            mce_printk(MCE_QUIET, "MCE: guest has not handled previous"
+                       " vMCE yet!\n");
+            return -1;
         }
 
-    return ret;
+        spin_lock(&v->arch.vmce.lock);
+
+        v->arch.vmce.mcg_status = gstatus;
+        /*
+         * 1. Skip bank 0 to avoid 'bank 0 quirk' of old processors
+         * 2. Filter MCi_STATUS MSCOD model specific error code to guest
+         */
+        v->arch.vmce.bank[1].mci_status = mc_bank->mc_status &
+                                              MCi_STATUS_MSCOD_MASK;
+        v->arch.vmce.bank[1].mci_addr = mc_bank->mc_addr;
+        v->arch.vmce.bank[1].mci_misc = mc_bank->mc_misc;
+
+        spin_unlock(&v->arch.vmce.lock);
+    }
+
+    return 0;
 }
 
 /* It's said some ram is setup as mmio_direct for UC cache attribute */
@@ -469,11 +436,11 @@ int unmmap_broken_page(struct domain *d, mfn_t mfn, unsigned long gfn)
     if ( is_hardware_domain(d) )
         return 0;
 
-    if ( !mfn_valid(mfn) )
+    if (!mfn_valid(mfn_x(mfn)))
         return -EINVAL;
 
     if ( !has_hvm_container_domain(d) || !paging_mode_hap(d) )
-        return -EOPNOTSUPP;
+        return -ENOSYS;
 
     rc = -1;
     r_mfn = get_gfn_query(d, gfn, &pt);

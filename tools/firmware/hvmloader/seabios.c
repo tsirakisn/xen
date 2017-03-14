@@ -25,9 +25,21 @@
 #include "util.h"
 
 #include "smbios_types.h"
+#include "acpi/acpi2_0.h"
+#include "option_rom.h"
 
-#include <acpi2_0.h>
-#include <libacpi.h>
+#include <xen/hvm/params.h>
+
+#define ROM_INCLUDE_SEABIOS
+#define ROM_INCLUDE_ROMBIOS
+#define ROM_INCLUDE_VGABIOS
+#define ROM_INCLUDE_ETHERBOOT
+
+/* dont complain about unused rombios variable */
+#pragma GCC diagnostic warning "-Wunused-variable"
+#include "roms.inc"
+
+#define SEABIOS_OPTIONROM_PHYSICAL_END 0x000EA000
 
 extern unsigned char dsdt_anycpu_qemu_xen[];
 extern int dsdt_anycpu_qemu_xen_len;
@@ -57,10 +69,10 @@ static void seabios_setup_bios_info(void)
 {
     struct seabios_info *info = (void *)BIOS_INFO_PHYSICAL_ADDRESS;
 
-    *info = (struct seabios_info) {
-        .signature = "XenHVMSeaBIOS",
-        .length = sizeof(*info)
-    };
+    memset(info, 0, sizeof(*info));
+
+    memcpy(info->signature, "XenHVMSeaBIOS", sizeof(info->signature));
+    info->length = sizeof(*info);
 
     info->tables = (uint32_t)scratch_alloc(MAX_TABLES*sizeof(uint32_t), 0);
 }
@@ -99,7 +111,7 @@ static void seabios_acpi_build_tables(void)
         .dsdt_15cpu_len = 0,
     };
 
-    hvmloader_acpi_build_tables(&config, rsdp);
+    acpi_build_tables(&config, rsdp);
     add_table(rsdp);
 }
 
@@ -126,30 +138,78 @@ static void seabios_setup_e820(void)
     struct e820entry *e820 = scratch_alloc(sizeof(struct e820entry)*16, 0);
     info->e820 = (uint32_t)e820;
 
-    /* Upper boundary already checked by seabios_load(). */
-    BUG_ON(seabios_config.bios_address < 0x000c0000);
     /* SeaBIOS reserves memory in e820 as necessary so no low reservation. */
-    info->e820_nr = build_e820_table(e820, 0, seabios_config.bios_address);
+    info->e820_nr = build_e820_table(e820, 0, 0x100000-sizeof(seabios));
     dump_e820_table(e820, info->e820_nr);
 }
 
-static void seabios_load(const struct bios_config *bios,
-                         void *bios_addr, uint32_t bios_length)
+static void seabios_load_roms(void)
 {
-    unsigned int bios_dest = 0x100000 - bios_length;
+    int option_rom_sz = 0, vgabios_sz = 0, etherboot_sz = 0;
+    uint32_t etherboot_phys_addr = 0, option_rom_phys_addr = 0;
+    const char *load;
+    load = xenstore_read("hvmloader/seabios-legacy-load-roms", "0");
+    if (strcmp(load, "1") != 0)
+        return;
+    switch ( virtual_vga )
+    {
+    case VGA_cirrus:
+        printf("Loading Cirrus VGABIOS ...\n");
+        memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
+               vgabios_cirrusvga, sizeof(vgabios_cirrusvga));
+        vgabios_sz = round_option_rom(sizeof(vgabios_cirrusvga));
+        break;
+    case VGA_std:
+        printf("Loading Standard VGABIOS ...\n");
+        memcpy((void *)VGABIOS_PHYSICAL_ADDRESS,
+               vgabios_stdvga, sizeof(vgabios_stdvga));
+        vgabios_sz = round_option_rom(sizeof(vgabios_stdvga));
+        break;
+    case VGA_pt:
+        printf("Loading VGABIOS of passthroughed gfx ...\n");
+        vgabios_sz =
+            round_option_rom((*(uint8_t *)(VGABIOS_PHYSICAL_ADDRESS+2)) * 512);
+        break;
+    default:
+        printf("No emulated VGA adaptor ...\n");
+        break;
+    }
 
-    BUG_ON(bios_dest + bios_length > HVMLOADER_PHYSICAL_ADDRESS);
-    memcpy((void *)bios_dest, bios_addr, bios_length);
-    seabios_config.bios_address = bios_dest;
-    seabios_config.image_size = bios_length;
+    etherboot_phys_addr = VGABIOS_PHYSICAL_ADDRESS + vgabios_sz;
+    /* round address at 2k boundary for BIOS ROM scanning */
+    etherboot_phys_addr = (etherboot_phys_addr + 0x7ff) & ~0x7ff;
+    memcpy((void *)etherboot_phys_addr, etherboot, sizeof (etherboot));
+    etherboot_sz = sizeof (etherboot);
+
+    option_rom_phys_addr = etherboot_phys_addr + etherboot_sz;
+    option_rom_sz = pci_load_option_roms(SEABIOS_OPTIONROM_PHYSICAL_END, option_rom_phys_addr);
+
+    printf("Option ROMs:\n");
+    if ( vgabios_sz )
+        printf(" %05x-%05x: VGA BIOS\n",
+               VGABIOS_PHYSICAL_ADDRESS,
+               VGABIOS_PHYSICAL_ADDRESS + vgabios_sz - 1);
+    if ( etherboot_sz )
+        printf(" %05x-%05x: Etherboot ROM\n",
+               etherboot_phys_addr,
+               etherboot_phys_addr + etherboot_sz - 1);
+    if ( option_rom_sz )
+        printf(" %05x-%05x: PCI Option ROMs\n",
+               option_rom_phys_addr,
+               option_rom_phys_addr + option_rom_sz - 1);
 }
 
 struct bios_config seabios_config = {
     .name = "SeaBIOS",
 
-    .load_roms = NULL,
+    .image = seabios,
+    .image_size = sizeof(seabios),
 
-    .bios_load = seabios_load,
+    .bios_address = 0x100000 - sizeof(seabios),
+
+    .load_roms = seabios_load_roms,
+
+    .bios_load = NULL,
 
     .bios_info_setup = seabios_setup_bios_info,
     .bios_info_finish = seabios_finish_bios_info,

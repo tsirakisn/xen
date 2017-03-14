@@ -2,6 +2,7 @@
 #ifndef __X86_UACCESS_H__
 #define __X86_UACCESS_H__
 
+#include <xen/config.h>
 #include <xen/compiler.h>
 #include <xen/errno.h>
 #include <xen/prefetch.h>
@@ -10,12 +11,12 @@
 
 #include <asm/x86_64/uaccess.h>
 
-unsigned copy_to_user(void *to, const void *from, unsigned len);
-unsigned clear_user(void *to, unsigned len);
-unsigned copy_from_user(void *to, const void *from, unsigned len);
+unsigned long copy_to_user(void *to, const void *from, unsigned len);
+unsigned long clear_user(void *to, unsigned len);
+unsigned long copy_from_user(void *to, const void *from, unsigned len);
 /* Handles exceptions in both to and from, but doesn't do access_ok */
-unsigned __copy_to_user_ll(void __user*to, const void *from, unsigned n);
-unsigned __copy_from_user_ll(void *to, const void __user *from, unsigned n);
+unsigned long __copy_to_user_ll(void *to, const void *from, unsigned n);
+unsigned long __copy_from_user_ll(void *to, const void *from, unsigned n);
 
 extern long __get_user_bad(void);
 extern void __put_user_bad(void);
@@ -274,17 +275,7 @@ extern struct exception_table_entry __stop___ex_table[];
 extern struct exception_table_entry __start___pre_ex_table[];
 extern struct exception_table_entry __stop___pre_ex_table[];
 
-union stub_exception_token {
-    struct {
-        uint16_t ec;
-        uint8_t trapnr;
-    } fields;
-    unsigned long raw;
-};
-
-extern unsigned long search_exception_table(const struct cpu_user_regs *regs);
+extern unsigned long search_exception_table(unsigned long);
 extern void sort_exception_tables(void);
-extern void sort_exception_table(struct exception_table_entry *start,
-                                 const struct exception_table_entry *stop);
 
 #endif /* __X86_UACCESS_H__ */

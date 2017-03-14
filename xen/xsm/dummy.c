@@ -27,7 +27,7 @@ struct xsm_operations dummy_xsm_ops;
         }                                                              \
     } while (0)
 
-void __init xsm_fixup_ops (struct xsm_operations *ops)
+void xsm_fixup_ops (struct xsm_operations *ops)
 {
     set_to_dummy_if_null(ops, security_domaininfo);
     set_to_dummy_if_null(ops, domain_create);
@@ -89,14 +89,14 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, pci_config_permission);
     set_to_dummy_if_null(ops, get_vnumainfo);
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_PCI)
     set_to_dummy_if_null(ops, get_device_group);
     set_to_dummy_if_null(ops, test_assign_device);
     set_to_dummy_if_null(ops, assign_device);
     set_to_dummy_if_null(ops, deassign_device);
 #endif
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_DEVICE_TREE)
     set_to_dummy_if_null(ops, test_assign_dtdevice);
     set_to_dummy_if_null(ops, assign_dtdevice);
     set_to_dummy_if_null(ops, deassign_dtdevice);
@@ -129,24 +129,29 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
 
     set_to_dummy_if_null(ops, vm_event_control);
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef HAS_MEM_ACCESS
     set_to_dummy_if_null(ops, mem_access);
 #endif
 
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef HAS_MEM_PAGING
     set_to_dummy_if_null(ops, mem_paging);
 #endif
 
-#ifdef CONFIG_HAS_MEM_SHARING
+#ifdef HAS_MEM_SHARING
     set_to_dummy_if_null(ops, mem_sharing);
 #endif
 
-    set_to_dummy_if_null(ops, platform_op);
 #ifdef CONFIG_X86
     set_to_dummy_if_null(ops, do_mca);
     set_to_dummy_if_null(ops, shadow_control);
+    set_to_dummy_if_null(ops, hvm_set_pci_intx_level);
+    set_to_dummy_if_null(ops, hvm_set_isa_irq_level);
+    set_to_dummy_if_null(ops, hvm_set_pci_link_route);
+    set_to_dummy_if_null(ops, hvm_inject_msi);
+    set_to_dummy_if_null(ops, hvm_ioreq_server);
     set_to_dummy_if_null(ops, mem_sharing_op);
     set_to_dummy_if_null(ops, apic);
+    set_to_dummy_if_null(ops, platform_op);
     set_to_dummy_if_null(ops, machine_memory_map);
     set_to_dummy_if_null(ops, domain_memory_map);
     set_to_dummy_if_null(ops, mmu_update);
@@ -156,7 +161,8 @@ void __init xsm_fixup_ops (struct xsm_operations *ops)
     set_to_dummy_if_null(ops, ioport_permission);
     set_to_dummy_if_null(ops, ioport_mapping);
     set_to_dummy_if_null(ops, pmu_op);
-    set_to_dummy_if_null(ops, dm_op);
 #endif
-    set_to_dummy_if_null(ops, xen_version);
+    set_to_dummy_if_null(ops, memory_translate);
+    set_to_dummy_if_null(ops, v4v_send);
+    set_to_dummy_if_null(ops, v4v_use);
 }

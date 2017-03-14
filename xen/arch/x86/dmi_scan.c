@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
@@ -237,7 +238,7 @@ const char *__init dmi_get_table(paddr_t *base, u32 *len)
 {
 	static unsigned int __initdata instance;
 
-	if (efi_enabled(EFI_BOOT)) {
+	if (efi_enabled) {
 		if (efi_smbios3_size && !(instance & 1)) {
 			*base = efi_smbios3_address;
 			*len = efi_smbios3_size;
@@ -497,7 +498,9 @@ static __init int reset_videomode_after_s3(struct dmi_blacklist *d)
 }
 #endif
 
-static __init int dmi_disable_acpi(struct dmi_blacklist *d) 
+
+#ifdef	CONFIG_ACPI_BOOT
+static __init __attribute__((unused)) int dmi_disable_acpi(struct dmi_blacklist *d) 
 { 
 	if (!acpi_force) { 
 		printk(KERN_NOTICE "%s detected: acpi off\n",d->ident);
@@ -512,7 +515,7 @@ static __init int dmi_disable_acpi(struct dmi_blacklist *d)
 /*
  * Limit ACPI to CPU enumeration for HT
  */
-static __init int force_acpi_ht(struct dmi_blacklist *d) 
+static __init __attribute__((unused)) int force_acpi_ht(struct dmi_blacklist *d) 
 { 
 	if (!acpi_force) { 
 		printk(KERN_NOTICE "%s detected: force use of acpi=ht\n", d->ident);
@@ -524,6 +527,7 @@ static __init int force_acpi_ht(struct dmi_blacklist *d)
 	}
 	return 0;
 } 
+#endif
 
 /*
  *	Process the DMI blacklists
@@ -560,6 +564,7 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 		}
 	},
 
+#ifdef	CONFIG_ACPI_BOOT
 	/*
 	 * If your system is blacklisted here, but you find that acpi=force
 	 * works for you, please contact acpi-devel@sourceforge.net
@@ -638,6 +643,8 @@ static __initdata struct dmi_blacklist dmi_blacklist[]={
 			MATCH(DMI_PRODUCT_NAME, "eserver xSeries 440"),
 			NO_MATCH, NO_MATCH }},
 
+#endif	// CONFIG_ACPI_BOOT
+
 	{ NULL, }
 };
 
@@ -695,7 +702,7 @@ static void __init dmi_decode(struct dmi_header *dm)
 
 void __init dmi_scan_machine(void)
 {
-	if ((!efi_enabled(EFI_BOOT) ? dmi_iterate(dmi_decode) :
+	if ((!efi_enabled ? dmi_iterate(dmi_decode) :
 	                    dmi_efi_iterate(dmi_decode)) == 0)
  		dmi_check_system(dmi_blacklist);
 	else

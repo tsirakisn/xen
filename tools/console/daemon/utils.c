@@ -33,6 +33,7 @@
 #include <string.h>
 #include <signal.h>
 
+#include "xenctrl.h"
 #include "utils.h"
 
 struct xs_handle *xs;
@@ -50,6 +51,10 @@ void daemonize(const char *pidfile)
 	int len;
 	int i;
 	char buf[100];
+
+	if (getppid() == 1) {
+		return;
+	}
 
 	if ((pid = fork()) > 0) {
 		exit(0);

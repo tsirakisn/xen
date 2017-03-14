@@ -17,6 +17,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/softirq.h>
 #include <asm/types.h>
@@ -30,7 +31,7 @@
 #define CLGI   .byte 0x0F,0x01,0xDD
 
 ENTRY(svm_asm_do_resume)
-        GET_CURRENT(bx)
+        GET_CURRENT(%rbx)
 .Lsvm_do_resume:
         call svm_intr_assist
         mov  %rsp,%rdi
@@ -96,7 +97,7 @@ UNLIKELY_END(svm_trace)
 
         VMRUN
 
-        GET_CURRENT(ax)
+        GET_CURRENT(%rax)
         push %rdi
         push %rsi
         push %rdx

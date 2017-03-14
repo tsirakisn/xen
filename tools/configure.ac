@@ -10,12 +10,10 @@ AC_CONFIG_FILES([
 hotplug/FreeBSD/rc.d/xencommons
 hotplug/FreeBSD/rc.d/xendriverdomain
 hotplug/Linux/init.d/sysconfig.xencommons
-hotplug/Linux/init.d/sysconfig.xendomains
 hotplug/Linux/init.d/xen-watchdog
 hotplug/Linux/init.d/xencommons
 hotplug/Linux/init.d/xendomains
 hotplug/Linux/init.d/xendriverdomain
-hotplug/Linux/launch-xenstore
 hotplug/Linux/vif-setup
 hotplug/Linux/xen-hotplug-common.sh
 hotplug/Linux/xendomains
@@ -23,7 +21,6 @@ hotplug/NetBSD/rc.d/xencommons
 hotplug/NetBSD/rc.d/xendriverdomain
 libxl/xenlight.pc.in
 libxl/xlutil.pc.in
-ocaml/xenstored/oxenstored.conf
 ])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_AUX_DIR([../])
@@ -167,15 +164,7 @@ AC_ARG_ENABLE([rombios],
     ])
 ])
 AS_IF([test "x$enable_rombios" = "xyes"], [
-    dnl as86, ld86, and bcc are only required when building rombios. They
-    dnl are only needed when the host system is x86 but that check is done
-    dnl for us above when checking if we should build with qemu-traditional.
-    AX_PATH_PROG_OR_FAIL([AS86], [as86])
-    AX_PATH_PROG_OR_FAIL([LD86], [ld86])
-    AX_PATH_PROG_OR_FAIL([BCC], [bcc])
-    AC_CHECK_LIB([lzma], [lzma_version_number], [],
-        [AC_MSG_ERROR([Could not find lzma, needed to build rombios])])
-    AC_DEFINE([HAVE_ROMBIOS], [1], [ROMBIOS enabled])
+AC_DEFINE([HAVE_ROMBIOS], [1], [ROMBIOS enabled])
     rombios=y],[
     rombios=n
 ])
@@ -217,35 +206,23 @@ AC_ARG_WITH([system-seabios],
     AS_HELP_STRING([--with-system-seabios@<:@=PATH@:>@],
        [Use system supplied seabios PATH instead of building and installing
         our own version]),[
-    # Disable compilation of SeaBIOS.
-    seabios=n
     case $withval in
         no) seabios_path= ;;
         *)  seabios_path=$withval ;;
     esac
 ],[])
-AS_IF([test "x$seabios" = "xy" -o -n "$seabios_path" ], [
-    AC_DEFINE_UNQUOTED([SEABIOS_PATH],
-                       ["${seabios_path:-$XENFIRMWAREDIR/seabios.bin}"],
-                       [SeaBIOS path])
-])
+AC_SUBST(seabios_path)
 
 AC_ARG_WITH([system-ovmf],
     AS_HELP_STRING([--with-system-ovmf@<:@=PATH@:>@],
        [Use system supplied OVMF PATH instead of building and installing
         our own version]),[
-    # Disable compilation of OVMF.
-    ovmf=n
     case $withval in
         no) ovmf_path= ;;
         *)  ovmf_path=$withval ;;
     esac
 ],[])
-AS_IF([test "x$ovmf" = "xy" -o -n "$ovmf_path" ], [
-    AC_DEFINE_UNQUOTED([OVMF_PATH],
-                       ["${ovmf_path:-$XENFIRMWAREDIR/ovmf.bin}"],
-                       [OVMF path])
-])
+AC_SUBST(ovmf_path)
 
 AC_ARG_WITH([extra-qemuu-configure-args],
     AS_HELP_STRING([--with-extra-qemuu-configure-args@<:@="--ARG1 ..."@:>@],
@@ -320,11 +297,7 @@ AS_IF([test "x$xsmpolicy" = "xy"], [
         xsmpolicy="n"
     ])
 ])
-dnl FreeBSD doesn't require bash (hotplug scripts are in plain sh)
-case "$host_os" in
-  freebsd*) ;;
-  *) AX_PATH_PROG_OR_FAIL([BASH], [bash]);;
-esac
+AX_PATH_PROG_OR_FAIL([BASH], [bash])
 AS_IF([echo "$PYTHON" | grep -q "^/"], [
     PYTHONPATH=$PYTHON
     PYTHON=`basename $PYTHONPATH`
@@ -346,7 +319,10 @@ dnl "host" here means the platform on which the hypervisor and tools is
 dnl going to run, not the platform on which we are building (known as
 dnl "build" in gnu speak).
 case "$host_cpu" in
-i[[3456]]86|x86_64|aarch64)
+i[[3456]]86|x86_64)
+    AX_PATH_PROG_OR_FAIL([AS86], [as86])
+    AX_PATH_PROG_OR_FAIL([LD86], [ld86])
+    AX_PATH_PROG_OR_FAIL([BCC], [bcc])
     AX_PATH_PROG_OR_FAIL([IASL], [iasl])
     ;;
 esac
@@ -379,6 +355,7 @@ AS_IF([test "x$enable_blktap2" = "xyes"], [
 AC_CHECK_LIB([aio], [io_setup], [], [AC_MSG_ERROR([Could not find libaio])])
 ])
 AC_SUBST(system_aio)
+AC_CHECK_LIB([crypto], [MD5], [], [AC_MSG_ERROR([Could not find libcrypto])])
 AX_CHECK_EXTFS
 AC_CHECK_LIB([gcrypt], [gcry_md_hash_buffer], [libgcrypt="y"], [libgcrypt="n"])
 AC_SUBST(libgcrypt)
@@ -430,12 +407,12 @@ PKG_CHECK_MODULES(LIBNL3, [libnl-3.0 >= 3.2.8 libnl-route-3.0 >= 3.2.8],
     [libnl3_lib="y"], [libnl3_lib="n"])
 
 AS_IF([test "x$libnl3_lib" = "xn" ], [
-    AC_MSG_WARN([Disabling support for Remus network buffering and COLO.
-    Please install libnl3 libraries (including libnl3-route), command line tools and devel
+    AC_MSG_WARN([Disabling support for Remus network buffering.
+    Please install libnl3 libraries, command line tools and devel
     headers - version 3.2.8 or higher])
-    AC_SUBST(libnl, [n])
+    AC_SUBST(remus_netbuf, [n])
     ],[
-    AC_SUBST(libnl, [y])
+    AC_SUBST(remus_netbuf, [y])
 ])
 
 AC_SUBST(LIBNL3_LIBS)
@@ -454,8 +431,9 @@ AS_IF([test "x$systemd" = "xy"], [
     hotplug/Linux/systemd/xen-watchdog.service
     hotplug/Linux/systemd/xenconsoled.service
     hotplug/Linux/systemd/xendomains.service
-    hotplug/Linux/systemd/xendriverdomain.service
     hotplug/Linux/systemd/xenstored.service
+    hotplug/Linux/systemd/xenstored.socket
+    hotplug/Linux/systemd/xenstored_ro.socket
     ])
 ])
 

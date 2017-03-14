@@ -71,17 +71,6 @@ static inline int wrmsr_safe(unsigned int msr, uint64_t val)
     return _rc;
 }
 
-static inline uint64_t msr_fold(const struct cpu_user_regs *regs)
-{
-    return (regs->rdx << 32) | regs->eax;
-}
-
-static inline void msr_split(struct cpu_user_regs *regs, uint64_t val)
-{
-    regs->rdx = val >> 32;
-    regs->rax = (uint32_t)val;
-}
-
 static inline uint64_t rdtsc(void)
 {
     uint32_t low, high;
@@ -89,22 +78,6 @@ static inline uint64_t rdtsc(void)
     __asm__ __volatile__("rdtsc" : "=a" (low), "=d" (high));
 
     return ((uint64_t)high << 32) | low;
-}
-
-static inline uint64_t rdtsc_ordered(void)
-{
-	/*
-	 * The RDTSC instruction is not ordered relative to memory access.
-	 * The Intel SDM and the AMD APM are both vague on this point, but
-	 * empirically an RDTSC instruction can be speculatively executed
-	 * before prior loads.  An RDTSC immediately after an appropriate
-	 * barrier appears to be ordered as a normal load, that is, it
-	 * provides the same ordering guarantees as reading from a global
-	 * memory location that some other imaginary CPU is updating
-	 * continuously with a time stamp.
-	 */
-	alternative("lfence", "mfence", X86_FEATURE_MFENCE_RDTSC);
-	return rdtsc();
 }
 
 #define __write_tsc(val) wrmsrl(MSR_IA32_TSC, val)

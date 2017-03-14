@@ -1,6 +1,7 @@
 #ifndef __ARM_PAGE_H__
 #define __ARM_PAGE_H__
 
+#include <xen/config.h>
 #include <public/xen.h>
 #include <asm/processor.h>
 
@@ -65,17 +66,6 @@
 #define PAGE_HYPERVISOR_WC      (DEV_WC)
 
 /*
- * Defines for changing the hypervisor PTE .ro and .nx bits. This is only to be
- * used with modify_xen_mappings.
- */
-#define _PTE_NX_BIT     0U
-#define _PTE_RO_BIT     1U
-#define PTE_NX          (1U << _PTE_NX_BIT)
-#define PTE_RO          (1U << _PTE_RO_BIT)
-#define PTE_NX_MASK(x)  (((x) >> _PTE_NX_BIT) & 0x1U)
-#define PTE_RO_MASK(x)  (((x) >> _PTE_RO_BIT) & 0x1U)
-
-/*
  * Stage 2 Memory Type.
  *
  * These are valid in the MemAttr[3:0] field of an LPAE stage 2 page
@@ -83,7 +73,6 @@
  *
  */
 #define MATTR_DEV     0x1
-#define MATTR_MEM_NC  0x5
 #define MATTR_MEM     0xf
 
 /* Flags for get_page_from_gva, gvirt_to_maddr etc */
@@ -95,7 +84,6 @@
 #include <xen/errno.h>
 #include <xen/types.h>
 #include <xen/lib.h>
-#include <asm/system.h>
 
 /* WARNING!  Unlike the Intel pagetable code, where l1 is the lowest
  * level and l4 is the root of the trie, the ARM pagetables follow ARM's
@@ -177,10 +165,6 @@ typedef struct __packed {
     unsigned long sbz1:5;
 } lpae_p2m_t;
 
-/* Permission mask: xn, write, read */
-#define P2M_PERM_MASK (0x00400000000000C0ULL)
-#define P2M_CLEAR_PERM(pte) ((pte).bits & ~P2M_PERM_MASK)
-
 /*
  * Walk is the common bits of p2m and pt entries which are needed to
  * simply walk the table (e.g. for debug).
@@ -213,21 +197,18 @@ static inline lpae_t mfn_to_xen_entry(unsigned long mfn, unsigned attr)
     paddr_t pa = ((paddr_t) mfn) << PAGE_SHIFT;
     lpae_t e = (lpae_t) {
         .pt = {
-            .valid = 1,           /* Mappings are present */
-            .table = 0,           /* Set to 1 for links and 4k maps */
-            .ai = attr,
+            .xn = 1,              /* No need to execute outside .text */
+            .ng = 1,              /* Makes TLB flushes easier */
+            .af = 1,              /* No need for access tracking */
             .ns = 1,              /* Hyp mode is in the non-secure world */
             .user = 1,            /* See below */
-            .ro = 0,              /* Assume read-write */
-            .af = 1,              /* No need for access tracking */
-            .ng = 1,              /* Makes TLB flushes easier */
-            .contig = 0,          /* Assume non-contiguous */
-            .xn = 1,              /* No need to execute outside .text */
-            .avail = 0,           /* Reference count for domheap mapping */
+            .ai = attr,
+            .table = 0,           /* Set to 1 for links and 4k maps */
+            .valid = 1,           /* Mappings are present */
         }};;
     /* Setting the User bit is strange, but the ATS1H[RW] instructions
      * don't seem to work otherwise, and since we never run on Xen
-     * pagetables in User mode it's OK.  If this changes, remember
+     * pagetables un User mode it's OK.  If this changes, remember
      * to update the hard-coded values in head.S too */
 
     switch ( attr )
@@ -291,20 +272,24 @@ extern size_t cacheline_bytes;
 
 static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
 {
+    size_t off;
     const void *end = p + size;
-    size_t cacheline_mask = cacheline_bytes - 1;
 
     dsb(sy);           /* So the CPU issues all writes to the range */
 
-    if ( (uintptr_t)p & cacheline_mask )
+    off = (unsigned long)p % cacheline_bytes;
+    if ( off )
     {
-        p = (void *)((uintptr_t)p & ~cacheline_mask);
+        p -= off;
         asm volatile (__clean_and_invalidate_dcache_one(0) : : "r" (p));
         p += cacheline_bytes;
+        size -= cacheline_bytes - off;
     }
-    if ( (uintptr_t)end & cacheline_mask )
+    off = (unsigned long)end % cacheline_bytes;
+    if ( off )
     {
-        end = (void *)((uintptr_t)end & ~cacheline_mask);
+        end -= off;
+        size -= off;
         asm volatile (__clean_and_invalidate_dcache_one(0) : : "r" (end));
     }
 
@@ -318,10 +303,9 @@ static inline int invalidate_dcache_va_range(const void *p, unsigned long size)
 
 static inline int clean_dcache_va_range(const void *p, unsigned long size)
 {
-    const void *end = p + size;
+    const void *end;
     dsb(sy);           /* So the CPU issues all writes to the range */
-    p = (void *)((uintptr_t)p & ~(cacheline_bytes - 1));
-    for ( ; p < end; p += cacheline_bytes )
+    for ( end = p + size; p < end; p += cacheline_bytes )
         asm volatile (__clean_dcache_one(0) : : "r" (p));
     dsb(sy);           /* So we know the flushes happen before continuing */
     /* ARM callers assume that dcache_* functions cannot fail. */
@@ -331,10 +315,9 @@ static inline int clean_dcache_va_range(const void *p, unsigned long size)
 static inline int clean_and_invalidate_dcache_va_range
     (const void *p, unsigned long size)
 {
-    const void *end = p + size;
+    const void *end;
     dsb(sy);         /* So the CPU issues all writes to the range */
-    p = (void *)((uintptr_t)p & ~(cacheline_bytes - 1));
-    for ( ; p < end; p += cacheline_bytes )
+    for ( end = p + size; p < end; p += cacheline_bytes )
         asm volatile (__clean_and_invalidate_dcache_one(0) : : "r" (p));
     dsb(sy);         /* So we know the flushes happen before continuing */
     /* ARM callers assume that dcache_* functions cannot fail. */
@@ -470,19 +453,15 @@ static inline int gva_to_ipa(vaddr_t va, paddr_t *paddr, unsigned int flags)
 #define LPAE_ENTRY_MASK (LPAE_ENTRIES - 1)
 
 #define THIRD_SHIFT    (PAGE_SHIFT)
-#define THIRD_ORDER    (THIRD_SHIFT - PAGE_SHIFT)
 #define THIRD_SIZE     ((paddr_t)1 << THIRD_SHIFT)
 #define THIRD_MASK     (~(THIRD_SIZE - 1))
 #define SECOND_SHIFT   (THIRD_SHIFT + LPAE_SHIFT)
-#define SECOND_ORDER   (SECOND_SHIFT - PAGE_SHIFT)
 #define SECOND_SIZE    ((paddr_t)1 << SECOND_SHIFT)
 #define SECOND_MASK    (~(SECOND_SIZE - 1))
 #define FIRST_SHIFT    (SECOND_SHIFT + LPAE_SHIFT)
-#define FIRST_ORDER    (FIRST_SHIFT - PAGE_SHIFT)
 #define FIRST_SIZE     ((paddr_t)1 << FIRST_SHIFT)
 #define FIRST_MASK     (~(FIRST_SIZE - 1))
 #define ZEROETH_SHIFT  (FIRST_SHIFT + LPAE_SHIFT)
-#define ZEROETH_ORDER  (ZEROETH_SHIFT - PAGE_SHIFT)
 #define ZEROETH_SIZE   ((paddr_t)1 << ZEROETH_SHIFT)
 #define ZEROETH_MASK   (~(ZEROETH_SIZE - 1))
 

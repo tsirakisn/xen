@@ -20,13 +20,8 @@ static void _clean_dirty_bitmap(struct domain *d)
 
 int shadow_domain_init(struct domain *d, unsigned int domcr_flags)
 {
-    static const struct log_dirty_ops sh_none_ops = {
-        .enable  = _enable_log_dirty,
-        .disable = _disable_log_dirty,
-        .clean   = _clean_dirty_bitmap,
-    };
-
-    paging_log_dirty_init(d, &sh_none_ops);
+    paging_log_dirty_init(d, _enable_log_dirty,
+                          _disable_log_dirty, _clean_dirty_bitmap);
     return is_pv_domain(d) ? 0 : -EOPNOTSUPP;
 }
 
@@ -37,17 +32,17 @@ static int _page_fault(struct vcpu *v, unsigned long va,
     return 0;
 }
 
-static bool_t _invlpg(struct vcpu *v, unsigned long va)
+static int _invlpg(struct vcpu *v, unsigned long va)
 {
     ASSERT_UNREACHABLE();
-    return 1;
+    return -EOPNOTSUPP;
 }
 
 static unsigned long _gva_to_gfn(struct vcpu *v, struct p2m_domain *p2m,
                                  unsigned long va, uint32_t *pfec)
 {
     ASSERT_UNREACHABLE();
-    return gfn_x(INVALID_GFN);
+    return INVALID_GFN;
 }
 
 static void _update_cr3(struct vcpu *v, int do_locking)

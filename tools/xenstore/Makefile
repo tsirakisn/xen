@@ -9,10 +9,8 @@ CFLAGS += -I.
 # Include configure output (config.h)
 CFLAGS += -include $(XEN_ROOT)/tools/config.h
 CFLAGS += -I./include
-CFLAGS += $(CFLAGS_libxenevtchn)
 CFLAGS += $(CFLAGS_libxenctrl)
 CFLAGS += -DXEN_LIB_STORED="\"$(XEN_LIB_STORED)\""
-CFLAGS += -DXEN_RUN_STORED="\"$(XEN_RUN_STORED)\""
 
 CFLAGS-$(CONFIG_SYSTEMD)  += $(SYSTEMD_CFLAGS)
 LDFLAGS-$(CONFIG_SYSTEMD) += $(SYSTEMD_LIBS)
@@ -23,9 +21,7 @@ LDFLAGS += $(LDFLAGS-y)
 CLIENTS := xenstore-exists xenstore-list xenstore-read xenstore-rm xenstore-chmod
 CLIENTS += xenstore-write xenstore-ls xenstore-watch
 
-XENSTORED_OBJS = xenstored_core.o xenstored_watch.o xenstored_domain.o
-XENSTORED_OBJS += xenstored_transaction.o xenstored_control.o
-XENSTORED_OBJS += xs_lib.o talloc.o utils.o tdb.o hashtable.o
+XENSTORED_OBJS = xenstored_core.o xenstored_watch.o xenstored_domain.o xenstored_transaction.o xs_lib.o talloc.o utils.o tdb.o hashtable.o
 
 XENSTORED_OBJS_$(CONFIG_Linux) = xenstored_posix.o
 XENSTORED_OBJS_$(CONFIG_SunOS) = xenstored_solaris.o xenstored_posix.o xenstored_probes.o
@@ -50,6 +46,10 @@ ifeq ($(XENSTORE_XENSTORED),y)
 ALL_TARGETS += xs_tdb_dump xenstored
 endif
 
+ifeq ($(CONFIG_Linux),y)
+ALL_TARGETS += init-xenstore-domain
+endif
+
 ifdef CONFIG_STUBDOM
 CFLAGS += -DNO_SOCKETS=1
 endif
@@ -72,10 +72,13 @@ xenstored_probes.o: xenstored_solaris.o
 CFLAGS += -DHAVE_DTRACE=1
 endif
 
-$(XENSTORED_OBJS): CFLAGS += $(CFLAGS_libxengnttab)
+init-xenstore-domain.o: CFLAGS += $(CFLAGS_libxenguest)
+
+init-xenstore-domain: init-xenstore-domain.o $(LIBXENSTORE)
+	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenctrl) $(LDLIBS_libxenguest) $(LDLIBS_libxenstore) -o $@ $(APPEND_LDFLAGS)
 
 xenstored: $(XENSTORED_OBJS)
-	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenevtchn) $(LDLIBS_libxengnttab) $(LDLIBS_libxenctrl) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
+	$(CC) $^ $(LDFLAGS) $(LDLIBS_libxenctrl) $(SOCKET_LIBS) -o $@ $(APPEND_LDFLAGS)
 
 xenstored.a: $(XENSTORED_OBJS)
 	$(AR) cr $@ $^

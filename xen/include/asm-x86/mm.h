@@ -2,9 +2,9 @@
 #ifndef __ASM_X86_MM_H__
 #define __ASM_X86_MM_H__
 
+#include <xen/config.h>
 #include <xen/list.h>
 #include <xen/spinlock.h>
-#include <xen/rwlock.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/x86_emulate.h>
@@ -203,8 +203,12 @@ struct page_info
 #define PGT_locked        PG_mask(1, 9)
 
  /* Count of uses of this frame as its current type. */
-#define PGT_count_width   PG_shift(9)
+#define PGT_count_width   PG_shift(10)
 #define PGT_count_mask    ((1UL<<PGT_count_width)-1)
+
+ /* Pinned by dom0 tools */
+#define _PGC_pinned_by_tools PG_shift(10)
+#define PGC_pinned_by_tools PG_mask(1, 10)
 
  /* Cleared when the owning guest 'frees' this page. */
 #define _PGC_allocated    PG_shift(1)
@@ -275,11 +279,8 @@ struct spage_info
 #define XENSHARE_readonly 1
 extern void share_xen_page_with_guest(
     struct page_info *page, struct domain *d, int readonly);
-extern int unshare_xen_page_with_guest(struct page_info *page,
-                                       struct domain *d);
 extern void share_xen_page_with_privileged_guests(
     struct page_info *page, int readonly);
-extern void free_shared_domheap_page(struct page_info *page);
 
 #define frame_table ((struct page_info *)FRAMETABLE_VIRT_START)
 #define spage_table ((struct spage_info *)SPAGETABLE_VIRT_START)
@@ -327,7 +328,7 @@ void init_guest_l4_table(l4_pgentry_t[], const struct domain *,
 bool_t fill_ro_mpt(unsigned long mfn);
 void zap_ro_mpt(unsigned long mfn);
 
-bool is_iomem_page(mfn_t mfn);
+int is_iomem_page(unsigned long mfn);
 
 void clear_superpage_mark(struct page_info *page);
 
@@ -480,9 +481,11 @@ extern struct rangeset *mmio_ro_ranges;
 #define compat_cr3_to_pfn(cr3) (((unsigned)(cr3) >> 12) | ((unsigned)(cr3) << 20))
 
 #ifdef MEMORY_GUARD
+void memguard_init(void);
 void memguard_guard_range(void *p, unsigned long l);
 void memguard_unguard_range(void *p, unsigned long l);
 #else
+#define memguard_init()                ((void)0)
 #define memguard_guard_range(_p,_l)    ((void)0)
 #define memguard_unguard_range(_p,_l)  ((void)0)
 #endif
@@ -505,8 +508,6 @@ extern int mmcfg_intercept_write(enum x86_segment seg,
                                  void *p_data,
                                  unsigned int bytes,
                                  struct x86_emulate_ctxt *ctxt);
-int pv_emul_cpuid(uint32_t leaf, uint32_t subleaf,
-                  struct cpuid_leaf *res, struct x86_emulate_ctxt *ctxt);
 
 int  ptwr_do_page_fault(struct vcpu *, unsigned long,
                         struct cpu_user_regs *);
@@ -540,6 +541,7 @@ int new_guest_cr3(unsigned long pfn);
 void make_cr3(struct vcpu *v, unsigned long mfn);
 void update_cr3(struct vcpu *v);
 int vcpu_destroy_pagetables(struct vcpu *);
+struct trap_bounce *propagate_page_fault(unsigned long addr, u16 error_code);
 void *do_page_walk(struct vcpu *v, unsigned long addr);
 
 int __sync_local_execstate(void);
@@ -585,21 +587,11 @@ typedef struct mm_lock {
 } mm_lock_t;
 
 typedef struct mm_rwlock {
-    percpu_rwlock_t    lock;
+    rwlock_t           lock;
     int                unlock_level;
     int                recurse_count;
     int                locker; /* CPU that holds the write lock */
     const char        *locker_function; /* func that took it */
 } mm_rwlock_t;
-
-#define arch_free_heap_page(d, pg)                                      \
-    page_list_del2(pg, is_xen_heap_page(pg) ?                           \
-                       &(d)->xenpage_list : &(d)->page_list,            \
-                   &(d)->arch.relmem_list)
-
-extern const char zero_page[];
-
-/* Build a 32bit PSE page table using 4MB pages. */
-void write_32bit_pse_identmap(uint32_t *l2);
 
 #endif /* __ASM_X86_MM_H__ */

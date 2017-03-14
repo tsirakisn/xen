@@ -1,5 +1,6 @@
         .text
 
+#include <xen/config.h>
 #include <xen/multiboot.h>
 #include <public/xen.h>
 #include <asm/asm_defns.h>

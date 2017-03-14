@@ -17,6 +17,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/iommu.h>
@@ -127,7 +128,6 @@ int __init amd_iommu_detect_one_acpi(
     }
 
     spin_lock_init(&iommu->lock);
-    INIT_LIST_HEAD(&iommu->ats_devices);
 
     iommu->seg = ivhd_block->pci_segment_group;
     iommu->bdf = ivhd_block->header.device_id;

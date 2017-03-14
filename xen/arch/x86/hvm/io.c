@@ -18,6 +18,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
@@ -34,7 +35,6 @@
 #include <asm/shadow.h>
 #include <asm/p2m.h>
 #include <asm/hvm/hvm.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/hvm/support.h>
 #include <asm/hvm/vpt.h>
 #include <asm/hvm/vpic.h>
@@ -56,9 +56,6 @@ void send_timeoffset_req(unsigned long timeoff)
         .state = STATE_IOREQ_READY,
     };
 
-    if ( timeoff == 0 )
-        return;
-
     if ( hvm_broadcast_ioreq(&p, 1) != 0 )
         gprintk(XENLOG_ERR, "Unsuccessful timeoffset update\n");
 }
@@ -77,7 +74,7 @@ void send_invalidate_req(void)
         gprintk(XENLOG_ERR, "Unsuccessful map-cache invalidate\n");
 }
 
-bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
+int handle_mmio(void)
 {
     struct hvm_emulate_ctxt ctxt;
     struct vcpu *curr = current;
@@ -86,7 +83,7 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
 
     ASSERT(!is_pvh_vcpu(curr));
 
-    hvm_emulate_init_once(&ctxt, validate, guest_cpu_user_regs());
+    hvm_emulate_prepare(&ctxt, guest_cpu_user_regs());
 
     rc = hvm_emulate_one(&ctxt);
 
@@ -99,33 +96,34 @@ bool hvm_emulate_one_insn(hvm_emulate_validate_t *validate)
     {
     case X86EMUL_UNHANDLEABLE:
         hvm_dump_emulation_state(XENLOG_G_WARNING "MMIO", &ctxt);
-        return false;
-
+        return 0;
     case X86EMUL_EXCEPTION:
-        if ( ctxt.ctxt.event_pending )
-            hvm_inject_event(&ctxt.ctxt.event);
+        if ( ctxt.exn_pending )
+            hvm_inject_trap(&ctxt.trap);
+        break;
+    default:
         break;
     }
 
     hvm_emulate_writeback(&ctxt);
 
-    return true;
+    return 1;
 }
 
-bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                  struct npfec access)
+int handle_mmio_with_translation(unsigned long gva, unsigned long gpfn,
+                                 struct npfec access)
 {
     struct hvm_vcpu_io *vio = &current->arch.hvm_vcpu.hvm_io;
 
     vio->mmio_access = access.gla_valid &&
                        access.kind == npfec_kind_with_gla
                        ? access : (struct npfec){};
-    vio->mmio_gla = gla & PAGE_MASK;
+    vio->mmio_gva = gva & PAGE_MASK;
     vio->mmio_gpfn = gpfn;
     return handle_mmio();
 }
 
-bool handle_pio(uint16_t port, unsigned int size, int dir)
+int handle_pio(uint16_t port, unsigned int size, int dir)
 {
     struct vcpu *curr = current;
     struct hvm_vcpu_io *vio = &curr->arch.hvm_vcpu.hvm_io;
@@ -153,20 +151,19 @@ bool handle_pio(uint16_t port, unsigned int size, int dir)
                 memcpy(&guest_cpu_user_regs()->rax, &data, size);
         }
         break;
-
     case X86EMUL_RETRY:
         /* We should not advance RIP/EIP if the domain is shutting down */
         if ( curr->domain->is_shutting_down )
-            return false;
-        break;
+            return 0;
 
+        break;
     default:
         gdprintk(XENLOG_ERR, "Weird HVM ioemulation status %d.\n", rc);
         domain_crash(curr->domain);
-        return false;
+        break;
     }
 
-    return true;
+    return 1;
 }
 
 static bool_t dpci_portio_accept(const struct hvm_io_handler *handler,

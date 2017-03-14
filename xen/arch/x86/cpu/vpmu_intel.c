@@ -18,6 +18,7 @@
  * Author: Haitao Shan <haitao.shan@intel.com>
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/xenoprof.h>
 #include <xen/irq.h>
@@ -66,6 +67,10 @@
 /* Alias registers (0x4c1) for full-width writes to PMCs */
 #define MSR_PMC_ALIAS_MASK       (~(MSR_IA32_PERFCTR0 ^ MSR_IA32_A_PERFCTR0))
 static bool_t __read_mostly full_width_write;
+
+/* Intel-specific VPMU features */
+#define VPMU_CPU_HAS_DS                     0x100 /* Has Debug Store */
+#define VPMU_CPU_HAS_BTS                    0x200 /* Has Branch Trace Store */
 
 /*
  * MSR_CORE_PERF_FIXED_CTR_CTRL contains the configuration of all fixed
@@ -329,7 +334,7 @@ static int core2_vpmu_save(struct vcpu *v, bool_t to_guest)
 
     if ( to_guest )
     {
-        ASSERT(!has_vlapic(v->domain));
+        ASSERT(!is_hvm_vcpu(v));
         memcpy((void *)(&vpmu->xenpmu_data->pmu.c.intel) + regs_off,
                vpmu->context + regs_off, regs_sz);
     }
@@ -359,8 +364,7 @@ static inline void __core2_vpmu_load(struct vcpu *v)
     }
 
     wrmsrl(MSR_CORE_PERF_FIXED_CTR_CTRL, core2_vpmu_cxt->fixed_ctrl);
-    if ( vpmu_is_set(vcpu_vpmu(v), VPMU_CPU_HAS_DS) )
-        wrmsrl(MSR_IA32_DS_AREA, core2_vpmu_cxt->ds_area);
+    wrmsrl(MSR_IA32_DS_AREA, core2_vpmu_cxt->ds_area);
 
     if ( !has_hvm_container_vcpu(v) )
     {
@@ -412,10 +416,8 @@ static int core2_vpmu_verify(struct vcpu *v)
             enabled_cntrs |= (1ULL << i);
     }
 
-    if ( vpmu_is_set(vpmu, VPMU_CPU_HAS_DS) &&
-         !(has_hvm_container_vcpu(v)
-           ? is_canonical_address(core2_vpmu_cxt->ds_area)
-           : __addr_ok(core2_vpmu_cxt->ds_area)) )
+    if ( vpmu_is_set(vcpu_vpmu(v), VPMU_CPU_HAS_DS) &&
+         !is_canonical_address(core2_vpmu_cxt->ds_area) )
         return -EINVAL;
 
     if ( (core2_vpmu_cxt->global_ctrl & enabled_cntrs) ||
@@ -440,7 +442,7 @@ static int core2_vpmu_load(struct vcpu *v, bool_t from_guest)
     {
         int ret;
 
-        ASSERT(!has_vlapic(v->domain));
+        ASSERT(!is_hvm_vcpu(v));
 
         memcpy(vpmu->context + regs_off,
                (void *)&v->arch.vpmu.xenpmu_data->pmu.c.intel + regs_off,
@@ -500,7 +502,7 @@ static int core2_vpmu_alloc_resource(struct vcpu *v)
     vpmu->context = core2_vpmu_cxt;
     vpmu->priv_context = p;
 
-    if ( !has_vlapic(v->domain) )
+    if ( !is_hvm_vcpu(v) )
     {
         /* Copy fixed/arch register offsets to shared area */
         ASSERT(vpmu->xenpmu_data);
@@ -512,7 +514,7 @@ static int core2_vpmu_alloc_resource(struct vcpu *v)
     return 1;
 
 out_err:
-    release_pmu_ownership(PMU_OWNER_HVM);
+    release_pmu_ownship(PMU_OWNER_HVM);
 
     xfree(core2_vpmu_cxt);
     xfree(p);
@@ -600,21 +602,14 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
                  "MSR_PERF_GLOBAL_STATUS(0x38E)!\n");
         return -EINVAL;
     case MSR_IA32_PEBS_ENABLE:
-        if ( vpmu_features & (XENPMU_FEATURE_IPC_ONLY |
-                              XENPMU_FEATURE_ARCH_ONLY) )
-            return -EINVAL;
         if ( msr_content )
             /* PEBS is reported as unavailable in MSR_IA32_MISC_ENABLE */
             return -EINVAL;
         return 0;
     case MSR_IA32_DS_AREA:
-        if ( !(vpmu_features & XENPMU_FEATURE_INTEL_BTS) )
-            return -EINVAL;
         if ( vpmu_is_set(vpmu, VPMU_CPU_HAS_DS) )
         {
-            if ( !(has_hvm_container_vcpu(v)
-                   ? is_canonical_address(msr_content)
-                   : __addr_ok(msr_content)) )
+            if ( !is_canonical_address(msr_content) )
             {
                 gdprintk(XENLOG_WARNING,
                          "Illegal address for IA32_DS_AREA: %#" PRIx64 "x\n",
@@ -658,50 +653,10 @@ static int core2_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         tmp = msr - MSR_P6_EVNTSEL(0);
         if ( tmp >= 0 && tmp < arch_pmc_cnt )
         {
-            bool_t blocked = 0;
-            uint64_t umaskevent = msr_content & MSR_IA32_CMT_EVTSEL_UE_MASK;
             struct xen_pmu_cntr_pair *xen_pmu_cntr_pair =
                 vpmu_reg_pointer(core2_vpmu_cxt, arch_counters);
 
             if ( msr_content & ARCH_CTRL_MASK )
-                return -EINVAL;
-
-            /* PMC filters */
-            if ( vpmu_features & (XENPMU_FEATURE_IPC_ONLY |
-                                  XENPMU_FEATURE_ARCH_ONLY) )
-            {
-                blocked = 1;
-                switch ( umaskevent )
-                {
-                /*
-                 * See the Pre-Defined Architectural Performance Events table
-                 * from the Intel 64 and IA-32 Architectures Software
-                 * Developer's Manual, Volume 3B, System Programming Guide,
-                 * Part 2.
-                 */
-                case 0x003c:	/* UnHalted Core Cycles */
-                case 0x013c:	/* UnHalted Reference Cycles */
-                case 0x00c0:	/* Instructions Retired */
-                    blocked = 0;
-                    break;
-                }
-            }
-
-            if ( vpmu_features & XENPMU_FEATURE_ARCH_ONLY )
-            {
-                /* Additional counters beyond IPC only; blocked already set. */
-                switch ( umaskevent )
-                {
-                case 0x4f2e:	/* Last Level Cache References */
-                case 0x412e:	/* Last Level Cache Misses */
-                case 0x00c4:	/* Branch Instructions Retired */
-                case 0x00c5:	/* All Branch Mispredict Retired */
-                    blocked = 0;
-                    break;
-               }
-            }
-
-            if ( blocked )
                 return -EINVAL;
 
             if ( has_hvm_container_vcpu(v) )
@@ -777,6 +732,33 @@ static int core2_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
     return 0;
 }
 
+static void core2_vpmu_do_cpuid(unsigned int input,
+                                unsigned int *eax, unsigned int *ebx,
+                                unsigned int *ecx, unsigned int *edx)
+{
+    switch ( input )
+    {
+    case 0x1:
+
+        if ( vpmu_is_set(vcpu_vpmu(current), VPMU_CPU_HAS_DS) )
+        {
+            /* Switch on the 'Debug Store' feature in CPUID.EAX[1]:EDX[21] */
+            *edx |= cpufeat_mask(X86_FEATURE_DS);
+            if ( cpu_has(&current_cpu_data, X86_FEATURE_DTES64) )
+                *ecx |= cpufeat_mask(X86_FEATURE_DTES64);
+            if ( cpu_has(&current_cpu_data, X86_FEATURE_DSCPL) )
+                *ecx |= cpufeat_mask(X86_FEATURE_DSCPL);
+        }
+        break;
+
+    case 0xa:
+        /* Report at most version 3 since that's all we currently emulate */
+        if ( MASK_EXTR(*eax, PMU_VERSION_MASK) > 3 )
+            *eax = (*eax & ~PMU_VERSION_MASK) | MASK_INSR(3, PMU_VERSION_MASK);
+        break;
+    }
+}
+
 /* Dump vpmu info on console, called in the context of keyhandler 'q'. */
 static void core2_vpmu_dump(const struct vcpu *v)
 {
@@ -836,7 +818,7 @@ static int core2_vpmu_do_interrupt(struct cpu_user_regs *regs)
         if ( is_pmc_quirk )
             handle_pmc_quirk(msr_content);
         core2_vpmu_cxt->global_status |= msr_content;
-        msr_content &= ~global_ovf_ctrl_mask;
+        msr_content = ~global_ovf_ctrl_mask;
         wrmsrl(MSR_CORE_PERF_GLOBAL_OVF_CTRL, msr_content);
     }
     else
@@ -860,18 +842,58 @@ static void core2_vpmu_destroy(struct vcpu *v)
     vpmu->priv_context = NULL;
     if ( has_hvm_container_vcpu(v) && cpu_has_vmx_msr_bitmap )
         core2_vpmu_unset_msr_bitmap(v->arch.hvm_vmx.msr_bitmap);
-    release_pmu_ownership(PMU_OWNER_HVM);
+    release_pmu_ownship(PMU_OWNER_HVM);
     vpmu_clear(vpmu);
 }
 
-static const struct arch_vpmu_ops core2_vpmu_ops = {
+struct arch_vpmu_ops core2_vpmu_ops = {
     .do_wrmsr = core2_vpmu_do_wrmsr,
     .do_rdmsr = core2_vpmu_do_rdmsr,
     .do_interrupt = core2_vpmu_do_interrupt,
+    .do_cpuid = core2_vpmu_do_cpuid,
     .arch_vpmu_destroy = core2_vpmu_destroy,
     .arch_vpmu_save = core2_vpmu_save,
     .arch_vpmu_load = core2_vpmu_load,
     .arch_vpmu_dump = core2_vpmu_dump
+};
+
+static void core2_no_vpmu_do_cpuid(unsigned int input,
+                                unsigned int *eax, unsigned int *ebx,
+                                unsigned int *ecx, unsigned int *edx)
+{
+    /*
+     * As in this case the vpmu is not enabled reset some bits in the
+     * architectural performance monitoring related part.
+     */
+    if ( input == 0xa )
+    {
+        *eax &= ~PMU_VERSION_MASK;
+        *eax &= ~PMU_GENERAL_NR_MASK;
+        *eax &= ~PMU_GENERAL_WIDTH_MASK;
+
+        *edx &= ~PMU_FIXED_NR_MASK;
+        *edx &= ~PMU_FIXED_WIDTH_MASK;
+    }
+}
+
+/*
+ * If its a vpmu msr set it to 0.
+ */
+static int core2_no_vpmu_do_rdmsr(unsigned int msr, uint64_t *msr_content)
+{
+    int type = -1, index = -1;
+    if ( !is_core2_vpmu_msr(msr, &type, &index) )
+        return -EINVAL;
+    *msr_content = 0;
+    return 0;
+}
+
+/*
+ * These functions are used in case vpmu is not enabled.
+ */
+struct arch_vpmu_ops core2_no_vpmu_ops = {
+    .do_rdmsr = core2_no_vpmu_do_rdmsr,
+    .do_cpuid = core2_no_vpmu_do_cpuid,
 };
 
 int vmx_vpmu_initialise(struct vcpu *v)
@@ -880,12 +902,9 @@ int vmx_vpmu_initialise(struct vcpu *v)
     u64 msr_content;
     static bool_t ds_warned;
 
+    vpmu->arch_vpmu_ops = &core2_no_vpmu_ops;
     if ( vpmu_mode == XENPMU_MODE_OFF )
         return 0;
-
-    if ( v->domain->arch.cpuid->basic.pmu_version <= 1 ||
-         v->domain->arch.cpuid->basic.pmu_version >= 5 )
-        return -EINVAL;
 
     if ( (arch_pmc_cnt + fixed_pmc_cnt) == 0 )
         return -EINVAL;

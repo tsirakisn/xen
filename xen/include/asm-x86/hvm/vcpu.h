@@ -60,12 +60,12 @@ struct hvm_vcpu_io {
 
     /*
      * HVM emulation:
-     *  Linear address @mmio_gla maps to MMIO physical frame @mmio_gpfn.
+     *  Virtual address @mmio_gva maps to MMIO physical frame @mmio_gpfn.
      *  The latter is known to be an MMIO frame (not RAM).
      *  This translation is only valid for accesses as per @mmio_access.
      */
     struct npfec        mmio_access;
-    unsigned long       mmio_gla;
+    unsigned long       mmio_gva;
     unsigned long       mmio_gpfn;
 
     /*
@@ -97,6 +97,8 @@ static inline bool_t hvm_vcpu_io_need_completion(const struct hvm_vcpu_io *vio)
            !vio->io_req.data_is_ptr;
 }
 
+#define VMCX_EADDR    (~0ULL)
+
 struct nestedvcpu {
     bool_t nv_guestmode; /* vcpu in guestmode? */
     void *nv_vvmcx; /* l1 guest virtual VMCB/VMCS */
@@ -104,8 +106,8 @@ struct nestedvcpu {
     void *nv_n2vmcx; /* shadow VMCB/VMCS used to run l2 guest */
 
     uint64_t nv_vvmcxaddr; /* l1 guest physical address of nv_vvmcx */
-    paddr_t nv_n1vmcx_pa; /* host physical address of nv_n1vmcx */
-    paddr_t nv_n2vmcx_pa; /* host physical address of nv_n2vmcx */
+    uint64_t nv_n1vmcx_pa; /* host physical address of nv_n1vmcx */
+    uint64_t nv_n2vmcx_pa; /* host physical address of nv_n2vmcx */
 
     /* SVM/VMX arch specific */
     union {
@@ -162,15 +164,17 @@ struct hvm_vcpu {
     spinlock_t          tm_lock;
     struct list_head    tm_list;
 
-    bool                flag_dr_dirty;
-    bool                debug_state_latch;
-    bool                single_step;
+    u8                  flag_dr_dirty;
+    bool_t              debug_state_latch;
+    bool_t              single_step;
+
+    bool_t              hcall_preempted;
+    bool_t              hcall_64bit;
 
     struct hvm_vcpu_asid n1asid;
 
     u32                 msr_tsc_aux;
     u64                 msr_tsc_adjust;
-    u64                 msr_xss;
 
     union {
         struct arch_vmx_struct vmx;
@@ -201,7 +205,7 @@ struct hvm_vcpu {
     void *fpu_exception_callback_arg;
 
     /* Pending hw/sw interrupt (.vector = -1 means nothing pending). */
-    struct x86_event     inject_event;
+    struct hvm_trap     inject_trap;
 
     struct viridian_vcpu viridian;
 };

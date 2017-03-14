@@ -8,6 +8,7 @@
  *  Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <asm/current.h>
 #include <asm/processor.h>
@@ -108,6 +109,14 @@ static inline void fpu_fxrstor(struct vcpu *v)
     }
 }
 
+/* Restore x87 extended state */
+static inline void fpu_frstor(struct vcpu *v)
+{
+    const char *fpu_ctxt = v->arch.fpu_ctxt;
+
+    asm volatile ( "frstor %0" : : "m" (*fpu_ctxt) );
+}
+
 /*******************************/
 /*      FPU Save Functions     */
 /*******************************/
@@ -117,19 +126,7 @@ static inline uint64_t vcpu_xsave_mask(const struct vcpu *v)
     if ( v->fpu_dirtied )
         return v->arch.nonlazy_xstate_used ? XSTATE_ALL : XSTATE_LAZY;
 
-    ASSERT(v->arch.nonlazy_xstate_used);
-
-    /*
-     * The offsets of components which live in the extended region of
-     * compact xsave area are not fixed. Xsave area may be overwritten
-     * when a xsave with v->fpu_dirtied set is followed by one with
-     * v->fpu_dirtied clear.
-     * In such case, if hypervisor uses compact xsave area and guest
-     * has ever used lazy states (checking xcr0_accum excluding
-     * XSTATE_FP_SSE), vcpu_xsave_mask will return XSTATE_ALL. Otherwise
-     * return XSTATE_NONLAZY.
-     */
-    return xstate_all(v) ? XSTATE_ALL : XSTATE_NONLAZY;
+    return v->arch.nonlazy_xstate_used ? XSTATE_NONLAZY : 0;
 }
 
 /* Save x87 extended state */
@@ -201,6 +198,15 @@ static inline void fpu_fxsave(struct vcpu *v)
     fpu_ctxt->x[FPU_WORD_SIZE_OFFSET] = fip_width;
 }
 
+/* Save x87 FPU state */
+static inline void fpu_fsave(struct vcpu *v)
+{
+    char *fpu_ctxt = v->arch.fpu_ctxt;
+
+    /* FWAIT is required to make FNSAVE synchronous. */
+    asm volatile ( "fnsave %0 ; fwait" : "=m" (*fpu_ctxt) );
+}
+
 /*******************************/
 /*       VCPU FPU Functions    */
 /*******************************/
@@ -209,26 +215,11 @@ void vcpu_restore_fpu_eager(struct vcpu *v)
 {
     ASSERT(!is_idle_vcpu(v));
     
-    /* Restore nonlazy extended state (i.e. parts not tracked by CR0.TS). */
-    if ( !v->arch.nonlazy_xstate_used )
-        return;
-
-    /* Avoid recursion */
-    clts();
-
-    /*
-     * When saving full state even with !v->fpu_dirtied (see vcpu_xsave_mask()
-     * above) we also need to restore full state, to prevent subsequently
-     * saving state belonging to another vCPU.
-     */
-    if ( xstate_all(v) )
+    /* save the nonlazy extended state which is not tracked by CR0.TS bit */
+    if ( v->arch.nonlazy_xstate_used )
     {
-        fpu_xrstor(v, XSTATE_ALL);
-        v->fpu_initialised = 1;
-        v->fpu_dirtied = 1;
-    }
-    else
-    {
+        /* Avoid recursion */
+        clts();        
         fpu_xrstor(v, XSTATE_NONLAZY);
         stts();
     }
@@ -272,8 +263,10 @@ static bool_t _vcpu_save_fpu(struct vcpu *v)
 
     if ( cpu_has_xsave )
         fpu_xsave(v);
-    else
+    else if ( cpu_has_fxsr )
         fpu_fxsave(v);
+    else
+        fpu_fsave(v);
 
     v->fpu_dirtied = 0;
 
@@ -304,9 +297,7 @@ int vcpu_init_fpu(struct vcpu *v)
         v->arch.fpu_ctxt = &v->arch.xsave_area->fpu_sse;
     else
     {
-        BUILD_BUG_ON(__alignof(v->arch.xsave_area->fpu_sse) < 16);
-        v->arch.fpu_ctxt = _xzalloc(sizeof(v->arch.xsave_area->fpu_sse),
-                                    __alignof(v->arch.xsave_area->fpu_sse));
+        v->arch.fpu_ctxt = _xzalloc(sizeof(v->arch.xsave_area->fpu_sse), 16);
         if ( v->arch.fpu_ctxt )
         {
             typeof(v->arch.xsave_area->fpu_sse) *fpu_sse = v->arch.fpu_ctxt;

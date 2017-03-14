@@ -11,12 +11,12 @@
 #define unlikely(x)   __builtin_expect(!!(x),0)
 
 #define inline        __inline__
-#define always_inline __inline__ __attribute__ ((__always_inline__))
-#define noinline      __attribute__((__noinline__))
+#define always_inline __inline__ __attribute__ ((always_inline))
+#define noinline      __attribute__((noinline))
 
-#define noreturn      __attribute__((__noreturn__))
+#define noreturn      __attribute__((noreturn))
 
-#define __packed      __attribute__((__packed__))
+#define __packed      __attribute__((packed))
 
 #if (!defined(__clang__) && (__GNUC__ == 4) && (__GNUC_MINOR__ < 5))
 #define unreachable() do {} while (1)
@@ -34,8 +34,6 @@
 #define __used_section(s) __used __attribute__((__section__(s)))
 #define __text_section(s) __attribute__((__section__(s)))
 
-#define __aligned(a) __attribute__((__aligned__(a)))
-
 #ifdef INIT_SECTIONS_ONLY
 /*
  * For sources indicated to have only init code, make sure even
@@ -45,9 +43,8 @@
 #define __inline__ __inline__ __init
 #endif
 
-#define __attribute_pure__  __attribute__((__pure__))
+#define __attribute_pure__  __attribute__((pure))
 #define __attribute_const__ __attribute__((__const__))
-#define __transparent__     __attribute__((__transparent_union__))
 
 /*
  * The difference between the following two attributes is that __used is
@@ -63,8 +60,7 @@
 #define __used         __attribute__((__used__))
 #define __maybe_unused __attribute__((__unused__))
 
-#define __must_check __attribute__((__warn_unused_result__))
-#define __nonnull(...) __attribute__((__nonnull__(__VA_ARGS__)))
+#define __must_check __attribute__((warn_unused_result))
 
 #define offsetof(a,b) __builtin_offsetof(a,b)
 
@@ -93,11 +89,5 @@
   ({ unsigned long __ptr;                       \
     __asm__ ("" : "=r"(__ptr) : "0"(ptr));      \
     (typeof(ptr)) (__ptr + (off)); })
-
-#ifdef __GCC_ASM_FLAG_OUTPUTS__
-# define ASM_FLAG_OUT(yes, no) yes
-#else
-# define ASM_FLAG_OUT(yes, no) no
-#endif
 
 #endif /* __LINUX_COMPILER_H */

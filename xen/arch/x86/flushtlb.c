@@ -7,6 +7,7 @@
  * Copyright (c) 2003-2006, K A Fraser
  */
 
+#include <xen/config.h>
 #include <xen/sched.h>
 #include <xen/softirq.h>
 #include <asm/flushtlb.h>
@@ -90,13 +91,9 @@ void write_cr3(unsigned long cr3)
     local_irq_restore(flags);
 }
 
-/*
- * The return value of this function is the passed in "flags" argument with
- * bits cleared that have been fully (i.e. system-wide) taken care of, i.e.
- * namely not requiring any further action on remote CPUs.
- */
-unsigned int flush_area_local(const void *va, unsigned int flags)
+void flush_area_local(const void *va, unsigned int flags)
 {
+    const struct cpuinfo_x86 *c = &current_cpu_data;
     unsigned int order = (flags - 1) & FLUSH_ORDER_MASK;
     unsigned long irqfl;
 
@@ -133,7 +130,6 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
 
     if ( flags & FLUSH_CACHE )
     {
-        const struct cpuinfo_x86 *c = &current_cpu_data;
         unsigned long i, sz = 0;
 
         if ( order < (BITS_PER_LONG - PAGE_SHIFT) )
@@ -144,14 +140,10 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
              c->x86_clflush_size && c->x86_cache_size && sz &&
              ((sz >> 10) < c->x86_cache_size) )
         {
-            alternative(ASM_NOP3, "sfence", X86_FEATURE_CLFLUSHOPT);
+            va = (const void *)((unsigned long)va & ~(sz - 1));
             for ( i = 0; i < sz; i += c->x86_clflush_size )
-                alternative_input(".byte " __stringify(NOP_DS_PREFIX) ";"
-                                  " clflush %0",
-                                  "data16 clflush %0",      /* clflushopt */
-                                  X86_FEATURE_CLFLUSHOPT,
-                                  "m" (((const char *)va)[i]));
-            flags &= ~FLUSH_CACHE;
+                 asm volatile ( "clflush %0"
+                                : : "m" (((const char *)va)[i]) );
         }
         else
         {
@@ -160,6 +152,4 @@ unsigned int flush_area_local(const void *va, unsigned int flags)
     }
 
     local_irq_restore(irqfl);
-
-    return flags;
 }

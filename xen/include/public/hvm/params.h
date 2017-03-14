@@ -29,47 +29,18 @@
  * Parameter space for HVMOP_{set,get}_param.
  */
 
-#define HVM_PARAM_CALLBACK_IRQ 0
-#define HVM_PARAM_CALLBACK_IRQ_TYPE_MASK xen_mk_ullong(0xFF00000000000000)
 /*
  * How should CPU0 event-channel notifications be delivered?
- *
+ * val[63:56] == 0: val[55:0] is a delivery GSI (Global System Interrupt).
+ * val[63:56] == 1: val[55:0] is a delivery PCI INTx line, as follows:
+ *                  Domain = val[47:32], Bus  = val[31:16],
+ *                  DevFn  = val[15: 8], IntX = val[ 1: 0]
+ * val[63:56] == 2: val[7:0] is a vector number, check for
+ *                  XENFEAT_hvm_callback_vector to know if this delivery
+ *                  method is available.
  * If val == 0 then CPU0 event-channel notifications are not delivered.
- * If val != 0, val[63:56] encodes the type, as follows:
  */
-
-#define HVM_PARAM_CALLBACK_TYPE_GSI      0
-/*
- * val[55:0] is a delivery GSI.  GSI 0 cannot be used, as it aliases val == 0,
- * and disables all notifications.
- */
-
-#define HVM_PARAM_CALLBACK_TYPE_PCI_INTX 1
-/*
- * val[55:0] is a delivery PCI INTx line:
- * Domain = val[47:32], Bus = val[31:16] DevFn = val[15:8], IntX = val[1:0]
- */
-
-#if defined(__i386__) || defined(__x86_64__)
-#define HVM_PARAM_CALLBACK_TYPE_VECTOR   2
-/*
- * val[7:0] is a vector number.  Check for XENFEAT_hvm_callback_vector to know
- * if this delivery method is available.
- */
-#elif defined(__arm__) || defined(__aarch64__)
-#define HVM_PARAM_CALLBACK_TYPE_PPI      2
-/*
- * val[55:16] needs to be zero.
- * val[15:8] is interrupt flag of the PPI used by event-channel:
- *  bit 8: the PPI is edge(1) or level(0) triggered
- *  bit 9: the PPI is active low(1) or high(0)
- * val[7:0] is a PPI number used by event-channel.
- * This is only used by ARM/ARM64 and masking/eoi the interrupt associated to
- * the notification is handled by the interrupt controller.
- */
-#define HVM_PARAM_CALLBACK_TYPE_PPI_FLAG_MASK      0xFF00
-#define HVM_PARAM_CALLBACK_TYPE_PPI_FLAG_LOW_LEVEL 2
-#endif
+#define HVM_PARAM_CALLBACK_IRQ 0
 
 /*
  * These are not used by Xen. They are here for convenience of HVM-guest
@@ -127,21 +98,11 @@
 #define _HVMPV_reference_tsc 3
 #define HVMPV_reference_tsc  (1 << _HVMPV_reference_tsc)
 
-/* Use Hypercall for remote TLB flush */
-#define _HVMPV_hcall_remote_tlb_flush 4
-#define HVMPV_hcall_remote_tlb_flush (1 << _HVMPV_hcall_remote_tlb_flush)
-
-/* Use APIC assist */
-#define _HVMPV_apic_assist 5
-#define HVMPV_apic_assist (1 << _HVMPV_apic_assist)
-
 #define HVMPV_feature_mask \
-        (HVMPV_base_freq | \
-         HVMPV_no_freq | \
-         HVMPV_time_ref_count | \
-         HVMPV_reference_tsc | \
-         HVMPV_hcall_remote_tlb_flush | \
-         HVMPV_apic_assist)
+	(HVMPV_base_freq | \
+	 HVMPV_no_freq | \
+	 HVMPV_time_ref_count | \
+	 HVMPV_reference_tsc)
 
 #endif
 
@@ -253,11 +214,10 @@
  */
 #define HVM_PARAM_X87_FIP_WIDTH 36
 
-/*
- * TSS (and its size) used on Intel when CR0.PE=0. The address occupies
- * the low 32 bits, while the size is in the high 32 ones.
- */
-#define HVM_PARAM_VM86_TSS_SIZED 37
+/* XenClient specific hvm params */
+
+/* use Xci cpuid signature instead of standard Xen one */
+#define HVM_PARAM_XCI_CPUID_SIGNATURE 37
 
 #define HVM_NR_PARAMS 38
 

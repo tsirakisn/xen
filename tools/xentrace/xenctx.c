@@ -25,8 +25,7 @@
 #include <getopt.h>
 #include <limits.h>
 
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
-#include <xenctrl.h>
+#include "xenctrl.h"
 #include <xen/foreign/x86_32.h>
 #include <xen/foreign/x86_64.h>
 #include <xen/hvm/save.h>

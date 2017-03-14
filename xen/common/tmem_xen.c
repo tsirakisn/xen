@@ -20,6 +20,12 @@ boolean_param("tmem", opt_tmem);
 bool_t __read_mostly opt_tmem_compress = 0;
 boolean_param("tmem_compress", opt_tmem_compress);
 
+bool_t __read_mostly opt_tmem_dedup = 0;
+boolean_param("tmem_dedup", opt_tmem_dedup);
+
+bool_t __read_mostly opt_tmem_tze = 0;
+boolean_param("tmem_tze", opt_tmem_tze);
+
 bool_t __read_mostly opt_tmem_shared_auth = 0;
 boolean_param("tmem_shared_auth", opt_tmem_shared_auth);
 
@@ -80,7 +86,7 @@ static inline void cli_put_page(void *cli_va, struct page_info *cli_pfp,
     if ( mark_dirty )
     {
         put_page_and_type(cli_pfp);
-        paging_mark_dirty(current->domain, _mfn(cli_mfn));
+        paging_mark_dirty(current->domain,cli_mfn);
     }
     else
         put_page(cli_pfp);
@@ -206,6 +212,28 @@ int tmem_decompress_to_client(xen_pfn_t cmfn, void *tmem_va,
         cli_put_page(cli_va, cli_pfp, cli_mfn, 1);
     else if ( copy_to_guest(clibuf, scratch, PAGE_SIZE) )
         return -EFAULT;
+    smp_mb();
+    return 1;
+}
+
+int tmem_copy_tze_to_client(xen_pfn_t cmfn, void *tmem_va,
+                                    pagesize_t len)
+{
+    void *cli_va;
+    unsigned long cli_mfn;
+    struct page_info *cli_pfp = NULL;
+
+    ASSERT(!(len & (sizeof(uint64_t)-1)));
+    ASSERT(len <= PAGE_SIZE);
+    ASSERT(len > 0 || tmem_va == NULL);
+    cli_va = cli_get_page(cmfn, &cli_mfn, &cli_pfp, 1);
+    if ( cli_va == NULL )
+        return -EFAULT;
+    if ( len > 0 )
+        memcpy((char *)cli_va,(char *)tmem_va,len);
+    if ( len < PAGE_SIZE )
+        memset((char *)cli_va+len,0,PAGE_SIZE-len);
+    cli_put_page(cli_va, cli_pfp, cli_mfn, 1);
     smp_mb();
     return 1;
 }

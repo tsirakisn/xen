@@ -17,6 +17,7 @@
 */
 #include <sys/types.h>
 #include <sys/mman.h>
+#include <xenctrl.h>
 #include "xenstored_core.h"
 #include <xen/grant_table.h>
 
@@ -49,12 +50,12 @@ evtchn_port_t xenbus_evtchn(void)
 
 void *xenbus_map(void)
 {
-	return xengnttab_map_grant_ref(*xgt_handle, xenbus_master_domid(),
+	return xc_gnttab_map_grant_ref(*xcg_handle, xenbus_master_domid(),
 			GNTTAB_RESERVED_XENSTORE, PROT_READ|PROT_WRITE);
 }
 
 void unmap_xenbus(void *interface)
 {
-	xengnttab_unmap(*xgt_handle, interface, 1);
+	xc_gnttab_munmap(*xcg_handle, interface, 1);
 }
 

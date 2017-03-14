@@ -69,8 +69,8 @@ struct libxl__yajl_ctx {
 #  define DEBUG_GEN_FREE(ctx)                   ((void)0)
 #  define DEBUG_GEN(ctx, type)                  ((void)0)
 #  define DEBUG_GEN_VALUE(ctx, type, value)     ((void)0)
-#  define DEBUG_GEN_STRING(ctx, value, length)  ((void)0)
-#  define DEBUG_GEN_NUMBER(ctx, value, length)  ((void)0)
+#  define DEBUG_GEN_STRING(ctx, value, lenght)  ((void)0)
+#  define DEBUG_GEN_NUMBER(ctx, value, lenght)  ((void)0)
 #  define DEBUG_GEN_REPORT(ctx)                 ((void)0)
 #endif
 
@@ -617,48 +617,42 @@ yajl_status libxl__json_object_to_yajl_gen(libxl__gc *gc,
     int idx = 0;
     yajl_status rc;
 
-#define CONVERT_YAJL_GEN_TO_STATUS(gen) \
-    ((gen) == yajl_gen_status_ok ? yajl_status_ok : yajl_status_error)
-
     switch (obj->type) {
     case JSON_NULL:
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_null(hand));
+        return yajl_gen_null(hand);
     case JSON_BOOL:
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_bool(hand, obj->u.b));
+        return yajl_gen_bool(hand, obj->u.b);
     case JSON_INTEGER:
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_integer(hand, obj->u.i));
+        return yajl_gen_integer(hand, obj->u.i);
     case JSON_DOUBLE:
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_double(hand, obj->u.d));
+        return yajl_gen_double(hand, obj->u.d);
     case JSON_NUMBER:
-        return CONVERT_YAJL_GEN_TO_STATUS(
-                  yajl_gen_number(hand, obj->u.string, strlen(obj->u.string)));
+        return yajl_gen_number(hand, obj->u.string, strlen(obj->u.string));
     case JSON_STRING:
-        return CONVERT_YAJL_GEN_TO_STATUS(
-                        libxl__yajl_gen_asciiz(hand, obj->u.string));
+        return libxl__yajl_gen_asciiz(hand, obj->u.string);
     case JSON_MAP: {
         libxl__json_map_node *node = NULL;
 
-        rc = CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_map_open(hand));
+        rc = yajl_gen_map_open(hand);
         if (rc != yajl_status_ok)
             return rc;
         for (idx = 0; idx < obj->u.map->count; idx++) {
             if (flexarray_get(obj->u.map, idx, (void**)&node) != 0)
                 break;
 
-            rc = CONVERT_YAJL_GEN_TO_STATUS(
-                            libxl__yajl_gen_asciiz(hand, node->map_key));
+            rc = libxl__yajl_gen_asciiz(hand, node->map_key);
             if (rc != yajl_status_ok)
                 return rc;
             rc = libxl__json_object_to_yajl_gen(gc, hand, node->obj);
             if (rc != yajl_status_ok)
                 return rc;
         }
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_map_close(hand));
+        return yajl_gen_map_close(hand);
     }
     case JSON_ARRAY: {
         libxl__json_object *node = NULL;
 
-        rc = CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_array_open(hand));
+        rc = yajl_gen_array_open(hand);
         if (rc != yajl_status_ok)
             return rc;
         for (idx = 0; idx < obj->u.array->count; idx++) {
@@ -668,14 +662,13 @@ yajl_status libxl__json_object_to_yajl_gen(libxl__gc *gc,
             if (rc != yajl_status_ok)
                 return rc;
         }
-        return CONVERT_YAJL_GEN_TO_STATUS(yajl_gen_array_close(hand));
+        return yajl_gen_array_close(hand);
     }
     case JSON_ANY:
         /* JSON_ANY is not a valid value for obj->type. */
         ;
     }
     abort();
-#undef CONVERT_YAJL_GEN_TO_STATUS
 }
 
 

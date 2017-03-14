@@ -30,12 +30,10 @@
 extern bool_t iommu_enable, iommu_enabled;
 extern bool_t force_iommu, iommu_verbose;
 extern bool_t iommu_workaround_bios_bug, iommu_igfx, iommu_passthrough;
-extern bool_t iommu_snoop, iommu_qinval, iommu_intremap, iommu_intpost;
+extern bool_t iommu_snoop, iommu_qinval, iommu_intremap;
 extern bool_t iommu_hap_pt_share;
 extern bool_t iommu_debug;
 extern bool_t amd_iommu_perdev_intremap;
-
-extern unsigned int iommu_dev_iotlb_timeout;
 
 #define IOMMU_PAGE_SIZE(sz) (1UL << PAGE_SHIFT_##sz)
 #define IOMMU_PAGE_MASK(sz) (~(u64)0 << PAGE_SHIFT_##sz)
@@ -76,9 +74,9 @@ void iommu_teardown(struct domain *d);
 #define IOMMUF_readable  (1u<<_IOMMUF_readable)
 #define _IOMMUF_writable 1
 #define IOMMUF_writable  (1u<<_IOMMUF_writable)
-int __must_check iommu_map_page(struct domain *d, unsigned long gfn,
-                                unsigned long mfn, unsigned int flags);
-int __must_check iommu_unmap_page(struct domain *d, unsigned long gfn);
+int iommu_map_page(struct domain *d, unsigned long gfn, unsigned long mfn,
+                   unsigned int flags);
+int iommu_unmap_page(struct domain *d, unsigned long gfn);
 
 enum iommu_feature
 {
@@ -94,7 +92,7 @@ struct domain_iommu {
     /* iommu_ops */
     const struct iommu_ops *platform_ops;
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef HAS_DEVICE_TREE
     /* List of DT devices assigned to this domain */
     struct list_head dt_devices;
 #endif
@@ -107,7 +105,7 @@ struct domain_iommu {
 #define iommu_set_feature(d, f)   set_bit(f, dom_iommu(d)->features)
 #define iommu_clear_feature(d, f) clear_bit(f, dom_iommu(d)->features)
 
-#ifdef CONFIG_HAS_PCI
+#ifdef HAS_PCI
 void pt_pci_init(void);
 
 struct pirq;
@@ -129,7 +127,7 @@ void iommu_read_msi_from_ire(struct msi_desc *msi_desc, struct msi_msg *msg);
 #define PT_IRQ_TIME_OUT MILLISECS(8)
 #endif /* HAS_PCI */
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef HAS_DEVICE_TREE
 #include <xen/device_tree.h>
 
 int iommu_assign_dt_device(struct domain *d, struct dt_device_node *dev);
@@ -161,41 +159,40 @@ struct iommu_ops {
     int (*assign_device)(struct domain *, u8 devfn, device_t *dev, u32 flag);
     int (*reassign_device)(struct domain *s, struct domain *t,
                            u8 devfn, device_t *dev);
-#ifdef CONFIG_HAS_PCI
+#ifdef HAS_PCI
     int (*get_device_group_id)(u16 seg, u8 bus, u8 devfn);
     int (*update_ire_from_msi)(struct msi_desc *msi_desc, struct msi_msg *msg);
     void (*read_msi_from_ire)(struct msi_desc *msi_desc, struct msi_msg *msg);
 #endif /* HAS_PCI */
 
     void (*teardown)(struct domain *d);
-    int __must_check (*map_page)(struct domain *d, unsigned long gfn,
-                                 unsigned long mfn, unsigned int flags);
-    int __must_check (*unmap_page)(struct domain *d, unsigned long gfn);
+    int (*map_page)(struct domain *d, unsigned long gfn, unsigned long mfn,
+                    unsigned int flags);
+    int (*unmap_page)(struct domain *d, unsigned long gfn);
     void (*free_page_table)(struct page_info *);
 #ifdef CONFIG_X86
     void (*update_ire_from_apic)(unsigned int apic, unsigned int reg, unsigned int value);
     unsigned int (*read_apic_from_ire)(unsigned int apic, unsigned int reg);
     int (*setup_hpet_msi)(struct msi_desc *);
 #endif /* CONFIG_X86 */
-    int __must_check (*suspend)(void);
+    void (*suspend)(void);
     void (*resume)(void);
     void (*share_p2m)(struct domain *d);
     void (*crash_shutdown)(void);
-    int __must_check (*iotlb_flush)(struct domain *d, unsigned long gfn,
-                                    unsigned int page_count);
-    int __must_check (*iotlb_flush_all)(struct domain *d);
+    void (*iotlb_flush)(struct domain *d, unsigned long gfn, unsigned int page_count);
+    void (*iotlb_flush_all)(struct domain *d);
     int (*get_reserved_device_memory)(iommu_grdm_t *, void *);
     void (*dump_p2m_table)(struct domain *d);
 };
 
-int __must_check iommu_suspend(void);
+void iommu_suspend(void);
 void iommu_resume(void);
 void iommu_crash_shutdown(void);
 int iommu_get_reserved_device_memory(iommu_grdm_t *, void *);
 
 void iommu_share_p2m_table(struct domain *d);
 
-#ifdef CONFIG_HAS_PCI
+#ifdef HAS_PCI
 int iommu_do_pci_domctl(struct xen_domctl *, struct domain *d,
                         XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
 #endif
@@ -203,11 +200,8 @@ int iommu_do_pci_domctl(struct xen_domctl *, struct domain *d,
 int iommu_do_domctl(struct xen_domctl *, struct domain *d,
                     XEN_GUEST_HANDLE_PARAM(xen_domctl_t));
 
-int __must_check iommu_iotlb_flush(struct domain *d, unsigned long gfn,
-                                   unsigned int page_count);
-int __must_check iommu_iotlb_flush_all(struct domain *d);
-
-void iommu_dev_iotlb_flush_timeout(struct domain *d, struct pci_dev *pdev);
+void iommu_iotlb_flush(struct domain *d, unsigned long gfn, unsigned int page_count);
+void iommu_iotlb_flush_all(struct domain *d);
 
 /*
  * The purpose of the iommu_dont_flush_iotlb optional cpu flag is to

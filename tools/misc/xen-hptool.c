@@ -1,4 +1,3 @@
-#include <xenevtchn.h>
 #include <xenctrl.h>
 #include <xc_private.h>
 #include <xc_core.h>
@@ -99,7 +98,7 @@ static int hp_mem_query_func(int argc, char *argv[])
     return ret;
 }
 
-static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
+static int suspend_guest(xc_interface *xch, xc_evtchn *xce, int domid,
                          int *evtchn, int *lockfd)
 {
     int port, rc, suspend_evtchn = -1;
@@ -124,7 +123,7 @@ static int suspend_guest(xc_interface *xch, xenevtchn_handle *xce, int domid,
     }
     *evtchn = suspend_evtchn;
 
-    rc = xenevtchn_notify(xce, suspend_evtchn);
+    rc = xc_evtchn_notify(xce, suspend_evtchn);
     if (rc < 0)
     {
         fprintf(stderr, "Failed to notify suspend channel: errno %d\n", rc);
@@ -199,8 +198,8 @@ static int hp_mem_offline_func(int argc, char *argv[])
                 else if (status & PG_OFFLINE_OWNED)
                 {
                     int result, suspend_evtchn = -1, suspend_lockfd = -1;
-                    xenevtchn_handle *xce;
-                    xce = xenevtchn_open(NULL, 0);
+                    xc_evtchn *xce;
+                    xce = xc_evtchn_open(NULL, 0);
 
                     if (xce == NULL)
                     {
@@ -215,7 +214,7 @@ static int hp_mem_offline_func(int argc, char *argv[])
                     {
                         fprintf(stderr, "Failed to suspend guest %d for"
                                 " mfn %lx\n", domid, mfn);
-                        xenevtchn_close(xce);
+                        xc_evtchn_close(xce);
                         return -1;
                     }
 
@@ -239,7 +238,7 @@ static int hp_mem_offline_func(int argc, char *argv[])
                     xc_domain_resume(xch, domid, 1);
                     xc_suspend_evtchn_release(xch, xce, domid,
                                               suspend_evtchn, &suspend_lockfd);
-                    xenevtchn_close(xce);
+                    xc_evtchn_close(xce);
                 }
                 break;
             }

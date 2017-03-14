@@ -21,33 +21,28 @@
 
 #include <xen/sched.h>
 #include <xen/vm_event.h>
-#include <public/domctl.h>
 
-static inline int vm_event_init_domain(struct domain *d)
+static inline
+int vm_event_init_domain(struct domain *d)
 {
-    /* Nothing to do. */
+    /* Not supported on ARM. */
     return 0;
 }
 
-static inline void vm_event_cleanup_domain(struct domain *d)
+static inline
+void vm_event_cleanup_domain(struct domain *d)
 {
-    memset(&d->monitor, 0, sizeof(d->monitor));
+    /* Not supported on ARM. */
 }
 
-static inline void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v,
-                                              vm_event_response_t *rsp)
+static inline
+void vm_event_toggle_singlestep(struct domain *d, struct vcpu *v)
 {
     /* Not supported on ARM. */
 }
 
 static inline
 void vm_event_register_write_resume(struct vcpu *v, vm_event_response_t *rsp)
-{
-    /* Not supported on ARM. */
-}
-
-static inline
-void vm_event_emulate_check(struct vcpu *v, vm_event_response_t *rsp)
 {
     /* Not supported on ARM. */
 }

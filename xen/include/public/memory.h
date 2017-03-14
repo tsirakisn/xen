@@ -220,11 +220,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_machphys_mapping_t);
 #define XENMAPSPACE_gmfn_range   3 /* GMFN range, XENMEM_add_to_physmap only. */
 #define XENMAPSPACE_gmfn_foreign 4 /* GMFN from another dom,
                                     * XENMEM_add_to_physmap_batch only. */
-#define XENMAPSPACE_dev_mmio     5 /* device mmio region
-                                      ARM only; the region is mapped in
-                                      Stage-2 using the Normal Memory
-                                      Inner/Outer Write-Back Cacheable
-                                      memory attribute. */
 /* ` } */
 
 /*
@@ -263,15 +258,7 @@ struct xen_add_to_physmap_batch {
 
     /* Number of pages to go through */
     uint16_t size;
-
-#if __XEN_INTERFACE_VERSION__ < 0x00040700
-    domid_t foreign_domid; /* IFF gmfn_foreign. Should be 0 for other spaces. */
-#else
-    union xen_add_to_physmap_batch_extra {
-        domid_t foreign_domid; /* gmfn_foreign */
-        uint16_t res0;  /* All the other spaces. Should be 0 */
-    } u;
-#endif
+    domid_t foreign_domid; /* IFF gmfn_foreign */
 
     /* Indexes into space being mapped. */
     XEN_GUEST_HANDLE(xen_ulong_t) idxs;
@@ -310,8 +297,30 @@ struct xen_remove_from_physmap {
 typedef struct xen_remove_from_physmap xen_remove_from_physmap_t;
 DEFINE_XEN_GUEST_HANDLE(xen_remove_from_physmap_t);
 
-/*** REMOVED ***/
-/*#define XENMEM_translate_gpfn_list  8*/
+/*
+ * Translates a list of domain-specific GPFNs into MFNs and increases
+ * their ref count. Returns a -ve error code on failure. This call only
+ * works for auto-translated guests.
+ */
+#define XENMEM_translate_gpfn_list  29
+struct xen_translate_gpfn_list {
+    /* Which domain to translate for? */
+    domid_t domid;
+
+    /* Length of list. */
+    xen_ulong_t nr_gpfns;
+
+    /* List of GPFNs to translate. */
+    XEN_GUEST_HANDLE(xen_pfn_t) gpfn_list;
+
+    /*
+     * Output list to contain MFN translations. May be the same as the input
+     * list (in which case each input GPFN is overwritten with the output MFN).
+     */
+    XEN_GUEST_HANDLE(xen_pfn_t) mfn_list;
+};
+typedef struct xen_translate_gpfn_list xen_translate_gpfn_list_t;
+DEFINE_XEN_GUEST_HANDLE(xen_translate_gpfn_list_t);
 
 /*
  * Returns the pseudo-physical memory map as it was when the domain
@@ -339,8 +348,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_memory_map_t);
 /*
  * Returns the real physical memory map. Passes the same structure as
  * XENMEM_memory_map.
- * Specifying buffer as NULL will return the number of entries required
- * to store the complete memory map.
  * arg == addr of xen_memory_map_t.
  */
 #define XENMEM_machine_memory_map   10
@@ -405,14 +412,8 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_paging_op_t);
 #define XENMEM_access_op                    21
 #define XENMEM_access_op_set_access         0
 #define XENMEM_access_op_get_access         1
-/*
- * XENMEM_access_op_enable_emulate and XENMEM_access_op_disable_emulate are
- * currently unused, but since they have been in use please do not reuse them.
- *
- * #define XENMEM_access_op_enable_emulate     2
- * #define XENMEM_access_op_disable_emulate    3
- */
-#define XENMEM_access_op_set_access_multi   4
+#define XENMEM_access_op_enable_emulate     2
+#define XENMEM_access_op_disable_emulate    3
 
 typedef enum {
     XENMEM_access_n,
@@ -445,8 +446,7 @@ struct xen_mem_access_op {
     uint8_t access;
     domid_t domid;
     /*
-     * Number of pages for set op (or size of pfn_list for
-     * XENMEM_access_op_set_access_multi)
+     * Number of pages for set op
      * Ignored on setting default access and other ops
      */
     uint32_t nr;
@@ -456,16 +456,6 @@ struct xen_mem_access_op {
      * ~0ull is used to set and get the default access for pages
      */
     uint64_aligned_t pfn;
-    /*
-     * List of pfns to set access for
-     * Used only with XENMEM_access_op_set_access_multi
-     */
-    XEN_GUEST_HANDLE(const_uint64) pfn_list;
-    /*
-     * Corresponding list of access settings for pfn_list
-     * Used only with XENMEM_access_op_set_access_multi
-     */
-    XEN_GUEST_HANDLE(const_uint8) access_list;
 };
 typedef struct xen_mem_access_op xen_mem_access_op_t;
 DEFINE_XEN_GUEST_HANDLE(xen_mem_access_op_t);
@@ -479,7 +469,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_access_op_t);
 #define XENMEM_sharing_op_debug_gref        5
 #define XENMEM_sharing_op_add_physmap       6
 #define XENMEM_sharing_op_audit             7
-#define XENMEM_sharing_op_range_share       8
 
 #define XENMEM_SHARING_OP_S_HANDLE_INVALID  (-10)
 #define XENMEM_SHARING_OP_C_HANDLE_INVALID  (-9)
@@ -488,7 +477,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_access_op_t);
  * for sharing utilities sitting as "filters" in IO backends
  * (e.g. memshr + blktap(2)). The IO backend is only exposed 
  * to grant references, and this allows sharing of the grefs */
-#define XENMEM_SHARING_OP_FIELD_IS_GREF_FLAG   (xen_mk_ullong(1) << 62)
+#define XENMEM_SHARING_OP_FIELD_IS_GREF_FLAG   (1ULL << 62)
 
 #define XENMEM_SHARING_OP_FIELD_MAKE_GREF(field, val)  \
     (field) = (XENMEM_SHARING_OP_FIELD_IS_GREF_FLAG | val)
@@ -515,14 +504,7 @@ struct xen_mem_sharing_op {
             uint64_aligned_t client_gfn;    /* IN: the client gfn */
             uint64_aligned_t client_handle; /* IN: handle to the client page */
             domid_t  client_domain; /* IN: the client domain id */
-        } share;
-        struct mem_sharing_op_range {         /* OP_RANGE_SHARE */
-            uint64_aligned_t first_gfn;      /* IN: the first gfn */
-            uint64_aligned_t last_gfn;       /* IN: the last gfn */
-            uint64_aligned_t opaque;         /* Must be set to 0 */
-            domid_t client_domain;           /* IN: the client domain id */
-            uint16_t _pad[3];                /* Must be set to 0 */
-        } range;
+        } share; 
         struct mem_sharing_op_debug {     /* OP_DEBUG_xxx */
             union {
                 uint64_aligned_t gfn;      /* IN: gfn to debug          */
@@ -560,7 +542,7 @@ DEFINE_XEN_GUEST_HANDLE(xen_mem_sharing_op_t);
 
 /*
  * XENMEM_claim_pages flags - the are no flags at this time.
- * The zero value is appropriate.
+ * The zero value is appropiate.
  */
 
 /*
@@ -649,6 +631,26 @@ typedef struct xen_vnuma_topology_info xen_vnuma_topology_info_t;
 DEFINE_XEN_GUEST_HANDLE(xen_vnuma_topology_info_t);
 
 /* Next available subop number is 28 */
+
+/*
+ * Decrement the ref count of a list of mfns (previously incremented with
+ * XENMEM_translate_gpfn_list).
+ */
+#define XENMEM_release_mfn_list  30
+struct xen_release_mfn_list {
+    /* Which domain to release for? */
+    domid_t domid;
+
+    /* Length of list. */
+    xen_ulong_t nr_mfns;
+
+    /* List of GPFNs to release. */
+    XEN_GUEST_HANDLE(xen_pfn_t) mfn_list;
+};
+typedef struct xen_release_mfn_list xen_release_mfn_list_t;
+DEFINE_XEN_GUEST_HANDLE(xen_release_mfn_list_t);
+
+
 
 #endif /* __XEN_PUBLIC_MEMORY_H__ */
 

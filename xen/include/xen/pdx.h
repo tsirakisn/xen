@@ -1,7 +1,7 @@
 #ifndef __XEN_PDX_H__
 #define __XEN_PDX_H__
 
-#ifdef CONFIG_HAS_PDX
+#ifdef HAS_PDX
 
 extern unsigned long max_pdx;
 extern unsigned long pfn_pdx_bottom_mask, ma_va_bottom_mask;
@@ -21,7 +21,7 @@ extern void set_pdx_range(unsigned long smfn, unsigned long emfn);
 #define page_to_pdx(pg)  ((pg) - frame_table)
 #define pdx_to_page(pdx) (frame_table + (pdx))
 
-bool __mfn_valid(unsigned long mfn);
+extern int __mfn_valid(unsigned long mfn);
 
 static inline unsigned long pfn_to_pdx(unsigned long pfn)
 {

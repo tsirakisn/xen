@@ -14,10 +14,8 @@ XEN_ROOT=$(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
 CFLAGS  += -Werror
-CFLAGS  += $(CFLAGS_libxenevtchn)
 CFLAGS  += $(CFLAGS_libxenctrl)
 LDLIBS  += $(LDLIBS_libxenctrl)
-LDLIBS  += $(LDLIBS_libxenevtchn)
 
 SCRIPTS = xenmon.py
 

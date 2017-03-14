@@ -17,8 +17,6 @@
 #include "libxl_arch.h"
 #include <stdlib.h>
 
-#include <xc_dom.h>
-
 bool libxl__vnuma_configured(const libxl_domain_build_info *b_info)
 {
     return b_info->num_vnuma_nodes != 0;
@@ -254,7 +252,7 @@ int libxl__vnuma_build_vmemrange_hvm(libxl__gc *gc,
                                      uint32_t domid,
                                      libxl_domain_build_info *b_info,
                                      libxl__domain_build_state *state,
-                                     struct xc_dom_image *dom)
+                                     struct xc_hvm_build_args *args)
 {
     uint64_t hole_start, hole_end, next;
     int nid, nr_vmemrange;
@@ -266,10 +264,10 @@ int libxl__vnuma_build_vmemrange_hvm(libxl__gc *gc,
      * Guest physical address space layout:
      * [0, hole_start) [hole_start, hole_end) [hole_end, highmem_end)
      */
-    hole_start = dom->lowmem_end < dom->mmio_start ?
-        dom->lowmem_end : dom->mmio_start;
-    hole_end = (dom->mmio_start + dom->mmio_size) > (1ULL << 32) ?
-        (dom->mmio_start + dom->mmio_size) : (1ULL << 32);
+    hole_start = args->lowmem_end < args->mmio_start ?
+        args->lowmem_end : args->mmio_start;
+    hole_end = (args->mmio_start + args->mmio_size) > (1ULL << 32) ?
+        (args->mmio_start + args->mmio_size) : (1ULL << 32);
 
     assert(state->vmemranges == NULL);
 
@@ -283,7 +281,7 @@ int libxl__vnuma_build_vmemrange_hvm(libxl__gc *gc,
         /* Consider video ram belongs to vnode 0 */
         if (nid == 0) {
             if (p->memkb < b_info->video_memkb) {
-                LOGD(ERROR, domid, "vnode 0 too small to contain video ram");
+                LOG(ERROR, "vnode 0 too small to contain video ram");
                 rc = ERROR_INVAL;
                 goto out;
             }

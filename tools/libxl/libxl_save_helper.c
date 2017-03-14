@@ -52,7 +52,6 @@
 
 /*----- logger -----*/
 
-__attribute__((format(printf, 5, 0)))
 static void tellparent_vmessage(xentoollog_logger *logger_in,
                                 xentoollog_level level,
                                 int errnoval,
@@ -149,11 +148,8 @@ static void save_signal_handler(int num)
     int esave = errno;
 
     int r = dup2(unwriteable_fd, io_fd);
-    if (r != io_fd)
-        /* we can't write an xtl message because we might end up
-         * interleaving on our control stream; we can't use stdio
-         * because it's not async-signal-safe */
-        abort();
+    assert(r == io_fd); /* if not we can't write an xtl message because we
+                         * might end up interleaving on our control stream */
 
     errno = esave;
 }
@@ -239,7 +235,6 @@ static struct restore_callbacks helper_restore_callbacks;
 int main(int argc, char **argv)
 {
     int r;
-    int send_back_fd, recv_fd;
 
 #define NEXTARG (++argv, assert(*argv), *argv)
 
@@ -248,15 +243,13 @@ int main(int argc, char **argv)
 
     if (!strcmp(mode,"--save-domain")) {
 
-        io_fd =                             atoi(NEXTARG);
-        recv_fd =                           atoi(NEXTARG);
-        uint32_t dom =                      strtoul(NEXTARG,0,10);
-        uint32_t max_iters =                strtoul(NEXTARG,0,10);
-        uint32_t max_factor =               strtoul(NEXTARG,0,10);
-        uint32_t flags =                    strtoul(NEXTARG,0,10);
-        int hvm =                           atoi(NEXTARG);
-        unsigned cbflags =                  strtoul(NEXTARG,0,10);
-        xc_migration_stream_t stream_type = strtoul(NEXTARG,0,10);
+        io_fd =                    atoi(NEXTARG);
+        uint32_t dom =             strtoul(NEXTARG,0,10);
+        uint32_t max_iters =       strtoul(NEXTARG,0,10);
+        uint32_t max_factor =      strtoul(NEXTARG,0,10);
+        uint32_t flags =           strtoul(NEXTARG,0,10);
+        int hvm =                  atoi(NEXTARG);
+        unsigned cbflags =         strtoul(NEXTARG,0,10);
         assert(!*++argv);
 
         helper_setcallbacks_save(&helper_save_callbacks, cbflags);
@@ -265,24 +258,22 @@ int main(int argc, char **argv)
         setup_signals(save_signal_handler);
 
         r = xc_domain_save(xch, io_fd, dom, max_iters, max_factor, flags,
-                           &helper_save_callbacks, hvm, stream_type,
-                           recv_fd);
+                           &helper_save_callbacks, hvm);
         complete(r);
 
     } else if (!strcmp(mode,"--restore-domain")) {
 
-        io_fd =                             atoi(NEXTARG);
-        send_back_fd =                      atoi(NEXTARG);
-        uint32_t dom =                      strtoul(NEXTARG,0,10);
-        unsigned store_evtchn =             strtoul(NEXTARG,0,10);
-        domid_t store_domid =               strtoul(NEXTARG,0,10);
-        unsigned console_evtchn =           strtoul(NEXTARG,0,10);
-        domid_t console_domid =             strtoul(NEXTARG,0,10);
-        unsigned int hvm =                  strtoul(NEXTARG,0,10);
-        unsigned int pae =                  strtoul(NEXTARG,0,10);
-        int superpages =                    strtoul(NEXTARG,0,10);
-        unsigned cbflags =                  strtoul(NEXTARG,0,10);
-        xc_migration_stream_t stream_type = strtoul(NEXTARG,0,10);
+        io_fd =                    atoi(NEXTARG);
+        uint32_t dom =             strtoul(NEXTARG,0,10);
+        unsigned store_evtchn =    strtoul(NEXTARG,0,10);
+        domid_t store_domid =      strtoul(NEXTARG,0,10);
+        unsigned console_evtchn =  strtoul(NEXTARG,0,10);
+        domid_t console_domid =    strtoul(NEXTARG,0,10);
+        unsigned int hvm =         strtoul(NEXTARG,0,10);
+        unsigned int pae =         strtoul(NEXTARG,0,10);
+        int superpages =           strtoul(NEXTARG,0,10);
+        unsigned cbflags =         strtoul(NEXTARG,0,10);
+        int checkpointed =         strtoul(NEXTARG,0,10);
         assert(!*++argv);
 
         helper_setcallbacks_restore(&helper_restore_callbacks, cbflags);
@@ -296,8 +287,8 @@ int main(int argc, char **argv)
         r = xc_domain_restore(xch, io_fd, dom, store_evtchn, &store_mfn,
                               store_domid, console_evtchn, &console_mfn,
                               console_domid, hvm, pae, superpages,
-                              stream_type,
-                              &helper_restore_callbacks, send_back_fd);
+                              checkpointed,
+                              &helper_restore_callbacks);
         helper_stub_restore_results(store_mfn,console_mfn,0);
         complete(r);
 

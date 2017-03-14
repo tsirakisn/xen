@@ -17,6 +17,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/acpi.h>
 #include <xen/sched.h>
 #include <asm/p2m.h>
@@ -554,7 +555,7 @@ static int update_paging_mode(struct domain *d, unsigned long gfn)
     unsigned long old_root_mfn;
     struct domain_iommu *hd = dom_iommu(d);
 
-    if ( gfn == gfn_x(INVALID_GFN) )
+    if ( gfn == INVALID_MFN )
         return -EADDRNOTAVAIL;
     ASSERT(!(gfn >> DEFAULT_DOMAIN_ADDRESS_WIDTH));
 
@@ -591,7 +592,7 @@ static int update_paging_mode(struct domain *d, unsigned long gfn)
         hd->arch.paging_mode = level;
         hd->arch.root_table = new_root;
 
-        if ( !pcidevs_locked() )
+        if ( !spin_is_locked(&pcidevs_lock) )
             AMD_IOMMU_DEBUG("%s Try to access pdev_list "
                             "without aquiring pcidevs_lock.\n", __func__);
 

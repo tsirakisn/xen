@@ -1,10 +1,9 @@
 /*
  * include/asm-arm/monitor.h
  *
- * Arch-specific monitor_op domctl handler.
+ * Architecture-specific monitor_op domctl handler.
  *
  * Copyright (c) 2015 Tamas K Lengyel (tamas@tklengyel.com)
- * Copyright (c) 2016, Bitdefender S.R.L.
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public
@@ -26,38 +25,9 @@
 #include <public/domctl.h>
 
 static inline
-int arch_monitor_domctl_op(struct domain *d, struct xen_domctl_monitor_op *mop)
+int monitor_domctl(struct domain *d, struct xen_domctl_monitor_op *op)
 {
-    /* No arch-specific monitor ops on ARM. */
-    return -EOPNOTSUPP;
+    return -ENOSYS;
 }
 
-int arch_monitor_domctl_event(struct domain *d,
-                              struct xen_domctl_monitor_op *mop);
-
-static inline
-int arch_monitor_init_domain(struct domain *d)
-{
-    /* No arch-specific domain initialization on ARM. */
-    return 0;
-}
-
-static inline
-void arch_monitor_cleanup_domain(struct domain *d)
-{
-    /* No arch-specific domain cleanup on ARM. */
-}
-
-static inline uint32_t arch_monitor_get_capabilities(struct domain *d)
-{
-    uint32_t capabilities = 0;
-
-    capabilities = (1U << XEN_DOMCTL_MONITOR_EVENT_GUEST_REQUEST |
-                    1U << XEN_DOMCTL_MONITOR_EVENT_PRIVILEGED_CALL);
-
-    return capabilities;
-}
-
-int monitor_smc(void);
-
-#endif /* __ASM_ARM_MONITOR_H__ */
+#endif /* __ASM_X86_MONITOR_H__ */

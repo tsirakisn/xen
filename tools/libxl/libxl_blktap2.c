@@ -25,7 +25,8 @@ int libxl__blktap_enabled(libxl__gc *gc)
 
 char *libxl__blktap_devpath(libxl__gc *gc,
                             const char *disk,
-                            libxl_disk_format format)
+                            libxl_disk_format format,
+							char *keydir)
 {
     const char *type;
     char *params, *devname = NULL;
@@ -35,22 +36,63 @@ char *libxl__blktap_devpath(libxl__gc *gc,
     type = libxl__device_disk_string_of_format(format);
     err = tap_ctl_find(type, disk, &tap);
     if (err == 0) {
-        devname = GCSPRINTF("/dev/xen/blktap-2/tapdev%d", tap.minor);
+        devname = libxl__sprintf(gc, "/dev/xen/blktap-2/tapdev%d", tap.minor);
         if (devname)
             return devname;
     }
 
-    params = GCSPRINTF("%s:%s", type, disk);
+	if(!keydir || !strcmp(keydir, ""))
+	    setenv("TAPDISK2_CRYPTO_KEYDIR", "/config/platform-crypto-keys", 1);
+	else
+	{	char *keydirs = NULL;
+		keydirs = libxl__sprintf(gc, "/config/platform-crypto-keys,%s", keydir);
+		if(keydirs)
+			setenv("TAPDISK2_CRYPTO_KEYDIR", keydirs, 1);
+		else
+			setenv("TAPDISK2_CRYPTO_KEYDIR", "/config/platform-crypto-keys", 1);
+	}
+
+    params = libxl__sprintf(gc, "%s:%s", type, disk);
     err = tap_ctl_create(params, &devname);
     if (!err) {
         libxl__ptr_add(gc, devname);
         return devname;
     }
 
-    free(devname);
     return NULL;
 }
 
+static bool tapdev_is_shared(libxl__gc *gc, const char *params)
+{
+    char **domids, **vbds;
+    char *tp;
+    char *type;
+    unsigned int count1, count2, i, j;
+    unsigned int total = 0;
+
+    /* List all the domids that have vhd backends */
+    domids = libxl__xs_directory(gc, XBT_NULL, "backend/vbd", &count1);
+    if (domids) {
+        for (i = 0; i < count1; ++i) {
+            /* List all the vbds for that domid */
+            vbds = libxl__xs_directory(gc, XBT_NULL, libxl__sprintf(gc, "backend/vbd/%s", domids[i]), &count2);
+            if (vbds) {
+                for (j = 0; j < count2; ++j) {
+                    /* If the params are the same, we have a match */
+                    tp = libxl__xs_read(gc, XBT_NULL, libxl__sprintf(gc, "backend/vbd/%s/%s/tapdisk-params", domids[i], vbds[j]));
+                    type = libxl__xs_read(gc, XBT_NULL, libxl__sprintf(gc, "backend/vbd/%s/%s/device-type", domids[i], vbds[j]));
+                    if (tp != NULL && type != NULL && !strcmp(tp, params) && !strcmp(type, "cdrom")) {
+                        total++;
+                        if (total == 2)
+                            return true;
+                    }
+                }
+            }
+        }
+    }
+
+    return false;
+}
 
 int libxl__device_destroy_tapdisk(libxl__gc *gc, const char *params)
 {
@@ -73,6 +115,12 @@ int libxl__device_destroy_tapdisk(libxl__gc *gc, const char *params)
         /* returns -errno */
         LOGEV(ERROR, -err, "Unable to find type %s disk %s", type, disk);
         return ERROR_FAIL;
+    }
+
+    /* We're using the tapdev. If anybody else also is, we can't destroy it! */
+    if (tapdev_is_shared(gc, params)) {
+        LOG(DEBUG, "Not destroying tapdev%d, another VM uses it", tap.minor);
+        return 0;
     }
 
     err = tap_ctl_destroy(tap.id, tap.minor);

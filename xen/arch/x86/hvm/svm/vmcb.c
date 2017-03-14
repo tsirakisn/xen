@@ -17,6 +17,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/keyhandler.h>
@@ -70,9 +71,6 @@ static int construct_vmcb(struct vcpu *v)
 {
     struct arch_svm_struct *arch_svm = &v->arch.hvm_svm;
     struct vmcb_struct *vmcb = arch_svm->vmcb;
-
-    /* Build-time check of the size of VMCB AMD structure. */
-    BUILD_BUG_ON(sizeof(*vmcb) != PAGE_SIZE);
 
     vmcb->_general1_intercepts = 
         GENERAL1_INTERCEPT_INTR        | GENERAL1_INTERCEPT_NMI         |
@@ -275,7 +273,7 @@ void svm_destroy_vmcb(struct vcpu *v)
     }
 
     nv->nv_n1vmcx = NULL;
-    nv->nv_n1vmcx_pa = INVALID_PADDR;
+    nv->nv_n1vmcx_pa = VMCX_EADDR;
     arch_svm->vmcb = NULL;
 }
 
@@ -305,9 +303,15 @@ static void vmcb_dump(unsigned char ch)
     printk("**************************************\n");
 }
 
+static struct keyhandler vmcb_dump_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = vmcb_dump,
+    .desc = "dump AMD-V VMCBs"
+};
+
 void __init setup_vmcb_dump(void)
 {
-    register_keyhandler('v', vmcb_dump, "dump AMD-V VMCBs", 1);
+    register_keyhandler('v', &vmcb_dump_keyhandler);
 }
 
 /*

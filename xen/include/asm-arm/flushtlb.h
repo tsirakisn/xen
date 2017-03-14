@@ -8,7 +8,9 @@
  * TLB since @page_timestamp.
  */
 /* XXX lazy implementation just doesn't clear anything.... */
-static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp) {}
+#define tlbflush_filter(mask, page_timestamp)                           \
+do {                                                                    \
+} while ( 0 )
 
 #define tlbflush_current_time()                 (0)
 
@@ -22,6 +24,9 @@ static inline void tlbflush_filter(cpumask_t *mask, uint32_t page_timestamp) {}
 
 /* Flush specified CPUs' TLBs */
 void flush_tlb_mask(const cpumask_t *mask);
+
+/* Flush CPU's TLBs for the specified domain */
+void flush_tlb_domain(struct domain *d);
 
 #endif /* __ASM_ARM_FLUSHTLB_H__ */
 /*

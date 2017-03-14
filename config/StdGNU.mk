@@ -1,21 +1,21 @@
-AS         = $(CROSS_COMPILE)as
-LD         = $(CROSS_COMPILE)ld
+AS         ?= $(CROSS_COMPILE)as
+LD         ?= $(CROSS_COMPILE)ld
 ifeq ($(clang),y)
-CC         = $(CROSS_COMPILE)clang
+CC         ?= $(CROSS_COMPILE)clang
 CXX        = $(CROSS_COMPILE)clang++
 LD_LTO     = $(CROSS_COMPILE)llvm-ld
 else
-CC         = $(CROSS_COMPILE)gcc
+CC         ?= $(CROSS_COMPILE)gcc
 CXX        = $(CROSS_COMPILE)g++
-LD_LTO     = $(CROSS_COMPILE)ld
+LD_LTO     ?= $(CROSS_COMPILE)ld
 endif
-CPP        = $(CC) -E
-AR         = $(CROSS_COMPILE)ar
-RANLIB     = $(CROSS_COMPILE)ranlib
-NM         = $(CROSS_COMPILE)nm
-STRIP      = $(CROSS_COMPILE)strip
-OBJCOPY    = $(CROSS_COMPILE)objcopy
-OBJDUMP    = $(CROSS_COMPILE)objdump
+CPP        ?= $(CC) -E
+AR         ?= $(CROSS_COMPILE)ar
+RANLIB     ?= $(CROSS_COMPILE)ranlib
+NM         ?= $(CROSS_COMPILE)nm
+STRIP      ?= $(CROSS_COMPILE)strip
+OBJCOPY    ?= $(CROSS_COMPILE)objcopy
+OBJDUMP    ?= $(CROSS_COMPILE)objdump
 SIZEUTIL   = $(CROSS_COMPILE)size
 
 # Allow git to be wrappered in the environment
@@ -31,7 +31,20 @@ DEBUG_DIR ?= /usr/lib/debug
 
 SOCKET_LIBS =
 UTIL_LIBS = -lutil
+DLOPEN_LIBS = -ldl
 
 SONAME_LDFLAG = -soname
 SHLIB_LDFLAGS = -shared
 
+ifneq ($(debug),y)
+CFLAGS +=  -fomit-frame-pointer
+else
+# Less than -O1 produces bad code and large stack frames
+CFLAGS += -O1 -fno-omit-frame-pointer
+CFLAGS-$(gcc) += -fno-optimize-sibling-calls
+endif
+
+ifeq ($(lto),y)
+CFLAGS += -flto
+LDFLAGS-$(clang) += -plugin LLVMgold.so
+endif

@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>
 #include <xen/init.h>
@@ -98,7 +99,8 @@ static int collect_cpu_info(unsigned int cpu_num, struct cpu_signature *csig)
 
     memset(csig, 0, sizeof(*csig));
 
-    if ( (c->x86_vendor != X86_VENDOR_INTEL) || (c->x86 < 6) )
+    if ( (c->x86_vendor != X86_VENDOR_INTEL) || (c->x86 < 6) ||
+         cpu_has(c, X86_FEATURE_IA64) )
     {
         printk(KERN_ERR "microcode: CPU%d not a capable Intel "
                "processor\n", cpu_num);
@@ -115,9 +117,8 @@ static int collect_cpu_info(unsigned int cpu_num, struct cpu_signature *csig)
     }
 
     wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
-
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
     /* get the current revision from MSR 0x8B */
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);
     csig->rev = (uint32_t)(msr_content >> 32);
@@ -143,8 +144,7 @@ static int microcode_sanity_check(void *mc)
     struct extended_sigtable *ext_header = NULL;
     struct extended_signature *ext_sig;
     unsigned long total_size, data_size, ext_table_size;
-    unsigned int ext_sigcount = 0, i;
-    uint32_t sum, orig_sum;
+    int sum, orig_sum, ext_sigcount = 0, i;
 
     total_size = get_totalsize(mc_header);
     data_size = get_datasize(mc_header);
@@ -184,8 +184,8 @@ static int microcode_sanity_check(void *mc)
     /* check extended table checksum */
     if ( ext_table_size )
     {
-        uint32_t ext_table_sum = 0;
-        uint32_t *ext_tablep = (uint32_t *)ext_header;
+        int ext_table_sum = 0;
+        int *ext_tablep = (int *)ext_header;
 
         i = ext_table_size / DWSIZE;
         while ( i-- )
@@ -202,7 +202,7 @@ static int microcode_sanity_check(void *mc)
     orig_sum = 0;
     i = (MC_HEADER_SIZE + data_size) / DWSIZE;
     while ( i-- )
-        orig_sum += ((uint32_t *)mc)[i];
+        orig_sum += ((int *)mc)[i];
     if ( orig_sum )
     {
         printk(KERN_ERR "microcode: aborting, bad checksum\n");
@@ -298,8 +298,8 @@ static int apply_microcode(unsigned int cpu)
     wrmsrl(MSR_IA32_UCODE_WRITE, (unsigned long)uci->mc.mc_intel->bits);
     wrmsrl(MSR_IA32_UCODE_REV, 0x0ULL);
 
-    /* As documented in the SDM: Do a CPUID 1 here */
-    cpuid_eax(1);
+    /* see notes above for revision 1.07.  Apparent chip bug */
+    sync_core();
 
     /* get the current revision from MSR 0x8B */
     rdmsrl(MSR_IA32_UCODE_REV, msr_content);

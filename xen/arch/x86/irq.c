@@ -5,6 +5,7 @@
  *  Copyright (C) 1992, 1998 Linus Torvalds, Ingo Molnar
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/delay.h>
 #include <xen/errno.h>
@@ -403,8 +404,10 @@ static vmask_t *irq_get_used_vector_mask(int irq)
         ret = &global_used_vector_map;
 
         if ( desc->arch.used_vectors )
-            printk(XENLOG_INFO "Unassigned IRQ %d already has used_vectors\n",
-                   irq);
+        {
+            printk(XENLOG_INFO "%s: Strange, unassigned irq %d already has used_vectors!\n",
+                   __func__, irq);
+        }
         else
         {
             int vector;
@@ -412,8 +415,8 @@ static vmask_t *irq_get_used_vector_mask(int irq)
             vector = irq_to_vector(irq);
             if ( vector > 0 )
             {
-                printk(XENLOG_INFO "IRQ %d already assigned vector %d\n",
-                       irq, vector);
+                printk(XENLOG_INFO "%s: Strange, irq %d already assigned vector %d!\n",
+                       __func__, irq, vector);
                 
                 ASSERT(!test_bit(vector, ret));
 
@@ -560,26 +563,21 @@ int assign_irq_vector(int irq, const cpumask_t *mask)
  * Initialize vector_irq on a new cpu. This function must be called
  * with vector_lock held.
  */
-void setup_vector_irq(unsigned int cpu)
+void __setup_vector_irq(int cpu)
 {
-    unsigned int irq, vector;
+    int irq, vector;
 
     /* Clear vector_irq */
-    for ( vector = 0; vector < NR_VECTORS; ++vector )
+    for (vector = 0; vector < NR_VECTORS; ++vector)
         per_cpu(vector_irq, cpu)[vector] = INT_MIN;
     /* Mark the inuse vectors */
-    for ( irq = 0; irq < nr_irqs; ++irq )
-    {
+    for (irq = 0; irq < nr_irqs; ++irq) {
         struct irq_desc *desc = irq_to_desc(irq);
 
-        if ( !irq_desc_initialized(desc) )
+        if (!irq_desc_initialized(desc) ||
+            !cpumask_test_cpu(cpu, desc->arch.cpu_mask))
             continue;
         vector = irq_to_vector(irq);
-        if ( vector >= FIRST_HIPRIORITY_VECTOR &&
-             vector <= LAST_HIPRIORITY_VECTOR )
-            cpumask_set_cpu(cpu, desc->arch.cpu_mask);
-        else if ( !cpumask_test_cpu(cpu, desc->arch.cpu_mask) )
-            continue;
         per_cpu(vector_irq, cpu)[vector] = irq;
     }
 }
@@ -1957,7 +1955,7 @@ int map_domain_pirq(
         struct pci_dev *pdev;
         unsigned int nr = 0;
 
-        ASSERT(pcidevs_locked());
+        ASSERT(spin_is_locked(&pcidevs_lock));
 
         ret = -ENODEV;
         if ( !cpu_has_apic )
@@ -2102,7 +2100,7 @@ int unmap_domain_pirq(struct domain *d, int pirq)
     if ( (pirq < 0) || (pirq >= d->nr_pirqs) )
         return -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     ASSERT(spin_is_locked(&d->event_lock));
 
     info = pirq_info(d, pirq);
@@ -2228,7 +2226,7 @@ void free_domain_pirqs(struct domain *d)
 {
     int i;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     spin_lock(&d->event_lock);
 
     for ( i = 0; i < d->nr_pirqs; i++ )
@@ -2236,7 +2234,7 @@ void free_domain_pirqs(struct domain *d)
             unmap_domain_pirq(d, i);
 
     spin_unlock(&d->event_lock);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 }
 
 static void dump_irqs(unsigned char key)
@@ -2318,24 +2316,32 @@ static void dump_irqs(unsigned char key)
     dump_ioapic_irq_info();
 }
 
+static struct keyhandler dump_irqs_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_irqs,
+    .desc = "dump interrupt bindings"
+};
+
 static int __init setup_dump_irqs(void)
 {
-    register_keyhandler('i', dump_irqs, "dump interrupt bindings", 1);
+    register_keyhandler('i', &dump_irqs_keyhandler);
     return 0;
 }
 __initcall(setup_dump_irqs);
 
-/* Reset irq affinities to match the given CPU mask. */
-void fixup_irqs(const cpumask_t *mask, bool_t verbose)
+/* A cpu has been removed from cpu_online_mask.  Re-set irq affinities. */
+void fixup_irqs(void)
 {
-    unsigned int irq;
+    unsigned int irq, sp;
     static int warned;
     struct irq_desc *desc;
+    irq_guest_action_t *action;
+    struct pending_eoi *peoi;
 
     for ( irq = 0; irq < nr_irqs; irq++ )
     {
-        bool_t break_affinity = 0, set_affinity = 1;
-        unsigned int vector;
+        int break_affinity = 0;
+        int set_affinity = 1;
         cpumask_t affinity;
 
         if ( irq == 2 )
@@ -2347,23 +2353,18 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
 
         spin_lock(&desc->lock);
 
-        vector = irq_to_vector(irq);
-        if ( vector >= FIRST_HIPRIORITY_VECTOR &&
-             vector <= LAST_HIPRIORITY_VECTOR )
-            cpumask_and(desc->arch.cpu_mask, desc->arch.cpu_mask, mask);
-
         cpumask_copy(&affinity, desc->affinity);
-        if ( !desc->action || cpumask_subset(&affinity, mask) )
+        if ( !desc->action || cpumask_subset(&affinity, &cpu_online_map) )
         {
             spin_unlock(&desc->lock);
             continue;
         }
 
-        cpumask_and(&affinity, &affinity, mask);
+        cpumask_and(&affinity, &affinity, &cpu_online_map);
         if ( cpumask_empty(&affinity) )
         {
             break_affinity = 1;
-            cpumask_copy(&affinity, mask);
+            cpumask_copy(&affinity, &cpu_online_map);
         }
 
         if ( desc->handler->disable )
@@ -2379,9 +2380,6 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
 
         spin_unlock(&desc->lock);
 
-        if ( !verbose )
-            continue;
-
         if ( break_affinity && set_affinity )
             printk("Broke affinity for irq %i\n", irq);
         else if ( !set_affinity )
@@ -2392,14 +2390,6 @@ void fixup_irqs(const cpumask_t *mask, bool_t verbose)
     local_irq_enable();
     mdelay(1);
     local_irq_disable();
-}
-
-void fixup_eoi(void)
-{
-    unsigned int irq, sp;
-    struct irq_desc *desc;
-    irq_guest_action_t *action;
-    struct pending_eoi *peoi;
 
     /* Clean up cpu_eoi_map of every interrupt to exclude this CPU. */
     for ( irq = 0; irq < nr_irqs; irq++ )

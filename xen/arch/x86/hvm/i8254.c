@@ -24,6 +24,7 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/xmalloc.h>
@@ -381,9 +382,6 @@ static uint32_t pit_ioport_read(struct PITState *pit, uint32_t addr)
 
 void pit_stop_channel0_irq(PITState *pit)
 {
-    if ( !has_vpit(current->domain) )
-        return;
-
     TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     spin_lock(&pit->lock);
     destroy_periodic_time(&pit->pt0);
@@ -394,9 +392,6 @@ static int pit_save(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
     int rc;
-
-    if ( !has_vpit(d) )
-        return 0;
 
     spin_lock(&pit->lock);
     
@@ -411,9 +406,6 @@ static int pit_load(struct domain *d, hvm_domain_context_t *h)
 {
     PITState *pit = domain_vpit(d);
     int i;
-
-    if ( !has_vpit(d) )
-        return -ENODEV;
 
     spin_lock(&pit->lock);
 
@@ -445,9 +437,6 @@ void pit_reset(struct domain *d)
     struct hvm_hw_pit_channel *s;
     int i;
 
-    if ( !has_vpit(d) )
-        return;
-
     TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     destroy_periodic_time(&pit->pt0);
     pit->pt0.source = PTSRC_isa;
@@ -469,9 +458,6 @@ void pit_init(struct domain *d, unsigned long cpu_khz)
 {
     PITState *pit = domain_vpit(d);
 
-    if ( !has_vpit(d) )
-        return;
-
     spin_lock_init(&pit->lock);
 
     if ( is_hvm_domain(d) )
@@ -486,9 +472,6 @@ void pit_init(struct domain *d, unsigned long cpu_khz)
 void pit_deinit(struct domain *d)
 {
     PITState *pit = domain_vpit(d);
-
-    if ( !has_vpit(d) )
-        return;
 
     TRACE_0D(TRC_HVM_EMUL_PIT_STOP_TIMER);
     destroy_periodic_time(&pit->pt0);
@@ -566,9 +549,6 @@ int pv_pit_handler(int port, int data, int write)
         .dir  = write ? IOREQ_WRITE : IOREQ_READ,
         .data = data
     };
-
-    if ( !has_vpit(current->domain) )
-        return ~0;
 
     if ( is_hardware_domain(current->domain) && hwdom_pit_access(&ioreq) )
     {

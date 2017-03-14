@@ -38,43 +38,42 @@ int libxl__netbuffer_enabled(libxl__gc *gc)
     return 1;
 }
 
-int init_subkind_nic(libxl__checkpoint_devices_state *cds)
+int init_subkind_nic(libxl__remus_devices_state *rds)
 {
     int rc, ret;
-    libxl__domain_save_state *dss = CONTAINER_OF(cds, *dss, cds);
-    libxl__remus_state *rs = cds->concrete_data;
+    libxl__domain_suspend_state *dss = CONTAINER_OF(rds, *dss, rds);
 
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
-    rs->nlsock = nl_socket_alloc();
-    if (!rs->nlsock) {
-        LOGD(ERROR, dss->domid, "cannot allocate nl socket");
+    rds->nlsock = nl_socket_alloc();
+    if (!rds->nlsock) {
+        LOG(ERROR, "cannot allocate nl socket");
         rc = ERROR_FAIL;
         goto out;
     }
 
-    ret = nl_connect(rs->nlsock, NETLINK_ROUTE);
+    ret = nl_connect(rds->nlsock, NETLINK_ROUTE);
     if (ret) {
-        LOGD(ERROR, dss->domid, "failed to open netlink socket: %s",
-             nl_geterror(ret));
+        LOG(ERROR, "failed to open netlink socket: %s",
+            nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
 
     /* get list of all qdiscs installed on network devs. */
-    ret = rtnl_qdisc_alloc_cache(rs->nlsock, &rs->qdisc_cache);
+    ret = rtnl_qdisc_alloc_cache(rds->nlsock, &rds->qdisc_cache);
     if (ret) {
-        LOGD(ERROR, dss->domid, "failed to allocate qdisc cache: %s",
-             nl_geterror(ret));
+        LOG(ERROR, "failed to allocate qdisc cache: %s",
+            nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
 
     if (dss->remus->netbufscript) {
-        rs->netbufscript = libxl__strdup(gc, dss->remus->netbufscript);
+        rds->netbufscript = libxl__strdup(gc, dss->remus->netbufscript);
     } else {
-        rs->netbufscript = GCSPRINTF("%s/remus-netbuf-setup",
-                                     libxl__xen_script_dir_path());
+        rds->netbufscript = GCSPRINTF("%s/remus-netbuf-setup",
+                                      libxl__xen_script_dir_path());
     }
 
     rc = 0;
@@ -83,24 +82,22 @@ out:
     return rc;
 }
 
-void cleanup_subkind_nic(libxl__checkpoint_devices_state *cds)
+void cleanup_subkind_nic(libxl__remus_devices_state *rds)
 {
-    libxl__remus_state *rs = cds->concrete_data;
-
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
     /* free qdisc cache */
-    if (rs->qdisc_cache) {
-        nl_cache_clear(rs->qdisc_cache);
-        nl_cache_free(rs->qdisc_cache);
-        rs->qdisc_cache = NULL;
+    if (rds->qdisc_cache) {
+        nl_cache_clear(rds->qdisc_cache);
+        nl_cache_free(rds->qdisc_cache);
+        rds->qdisc_cache = NULL;
     }
 
     /* close & free nlsock */
-    if (rs->nlsock) {
-        nl_close(rs->nlsock);
-        nl_socket_free(rs->nlsock);
-        rs->nlsock = NULL;
+    if (rds->nlsock) {
+        nl_close(rds->nlsock);
+        nl_socket_free(rds->nlsock);
+        rds->nlsock = NULL;
     }
 }
 
@@ -114,17 +111,17 @@ void cleanup_subkind_nic(libxl__checkpoint_devices_state *cds)
  * it must ONLY be used for remus because if driver domains
  * were in use it would constitute a security vulnerability.
  */
-static const char *get_vifname(libxl__checkpoint_device *dev,
+static const char *get_vifname(libxl__remus_device *dev,
                                const libxl_device_nic *nic)
 {
     const char *vifname = NULL;
     const char *path;
     int rc;
 
-    STATE_AO_GC(dev->cds->ao);
+    STATE_AO_GC(dev->rds->ao);
 
     /* Convenience aliases */
-    const uint32_t domid = dev->cds->domid;
+    const uint32_t domid = dev->rds->domid;
 
     path = GCSPRINTF("%s/backend/vif/%d/%d/vifname",
                      libxl__xs_get_dompath(gc, 0), domid, nic->devid);
@@ -147,32 +144,29 @@ static void free_qdisc(libxl__remus_device_nic *remus_nic)
     remus_nic->qdisc = NULL;
 }
 
-static int init_qdisc(libxl__checkpoint_devices_state *cds,
+static int init_qdisc(libxl__remus_devices_state *rds,
                       libxl__remus_device_nic *remus_nic)
 {
     int rc, ret, ifindex;
     struct rtnl_link *ifb = NULL;
     struct rtnl_qdisc *qdisc = NULL;
-    libxl__remus_state *rs = cds->concrete_data;
 
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
     /* Now that we have brought up REMUS_IFB device with plug qdisc for
      * this vif, so we need to refill the qdisc cache.
      */
-    ret = nl_cache_refill(rs->nlsock, rs->qdisc_cache);
+    ret = nl_cache_refill(rds->nlsock, rds->qdisc_cache);
     if (ret) {
-        LOGD(ERROR, cds->domid,
-             "cannot refill qdisc cache: %s", nl_geterror(ret));
+        LOG(ERROR, "cannot refill qdisc cache: %s", nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
     }
 
     /* get a handle to the REMUS_IFB interface */
-    ret = rtnl_link_get_kernel(rs->nlsock, 0, remus_nic->ifb, &ifb);
+    ret = rtnl_link_get_kernel(rds->nlsock, 0, remus_nic->ifb, &ifb);
     if (ret) {
-        LOGD(ERROR, cds->domid,
-             "cannot obtain handle for %s: %s", remus_nic->ifb,
+        LOG(ERROR, "cannot obtain handle for %s: %s", remus_nic->ifb,
             nl_geterror(ret));
         rc = ERROR_FAIL;
         goto out;
@@ -180,8 +174,7 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
 
     ifindex = rtnl_link_get_ifindex(ifb);
     if (!ifindex) {
-        LOGD(ERROR, cds->domid,
-             "interface %s has no index", remus_nic->ifb);
+        LOG(ERROR, "interface %s has no index", remus_nic->ifb);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -194,20 +187,18 @@ static int init_qdisc(libxl__checkpoint_devices_state *cds,
      * There is no need to explicitly free this qdisc as its just a
      * reference from the qdisc cache we allocated earlier.
      */
-    qdisc = rtnl_qdisc_get_by_parent(rs->qdisc_cache, ifindex, TC_H_ROOT);
+    qdisc = rtnl_qdisc_get_by_parent(rds->qdisc_cache, ifindex, TC_H_ROOT);
     if (qdisc) {
         const char *tc_kind = rtnl_tc_get_kind(TC_CAST(qdisc));
         /* Sanity check: Ensure that the root qdisc is a plug qdisc. */
         if (!tc_kind || strcmp(tc_kind, "plug")) {
-            LOGD(ERROR, cds->domid,
-                 "plug qdisc is not installed on %s", remus_nic->ifb);
+            LOG(ERROR, "plug qdisc is not installed on %s", remus_nic->ifb);
             rc = ERROR_FAIL;
             goto out;
         }
         remus_nic->qdisc = qdisc;
     } else {
-        LOGD(ERROR, cds->domid,
-             "Cannot get qdisc handle from ifb %s", remus_nic->ifb);
+        LOG(ERROR, "Cannot get qdisc handle from ifb %s", remus_nic->ifb);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -240,20 +231,19 @@ static void netbuf_teardown_script_cb(libxl__egc *egc,
  * $REMUS_IFB (for teardown)
  * setup/teardown as command line arg.
  */
-static void setup_async_exec(libxl__checkpoint_device *dev, char *op)
+static void setup_async_exec(libxl__remus_device *dev, char *op)
 {
     int arraysize, nr = 0;
     char **env = NULL, **args = NULL;
     libxl__remus_device_nic *remus_nic = dev->concrete_data;
-    libxl__checkpoint_devices_state *cds = dev->cds;
+    libxl__remus_devices_state *rds = dev->rds;
     libxl__async_exec_state *aes = &dev->aodev.aes;
-    libxl__remus_state *rs = cds->concrete_data;
 
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
     /* Convenience aliases */
-    char *const script = libxl__strdup(gc, rs->netbufscript);
-    const uint32_t domid = cds->domid;
+    char *const script = libxl__strdup(gc, rds->netbufscript);
+    const uint32_t domid = rds->domid;
     const int dev_id = remus_nic->devid;
     const char *const vif = remus_nic->vif;
     const char *const ifb = remus_nic->ifb;
@@ -279,7 +269,7 @@ static void setup_async_exec(libxl__checkpoint_device *dev, char *op)
     args[nr++] = NULL;
     assert(nr == arraysize);
 
-    aes->ao = dev->cds->ao;
+    aes->ao = dev->rds->ao;
     aes->what = GCSPRINTF("%s %s", args[0], args[1]);
     aes->env = env;
     aes->args = args;
@@ -296,13 +286,13 @@ static void setup_async_exec(libxl__checkpoint_device *dev, char *op)
 
 /* setup() and teardown() */
 
-static void nic_setup(libxl__egc *egc, libxl__checkpoint_device *dev)
+static void nic_setup(libxl__egc *egc, libxl__remus_device *dev)
 {
     int rc;
     libxl__remus_device_nic *remus_nic;
     const libxl_device_nic *nic = dev->backend_dev;
 
-    STATE_AO_GC(dev->cds->ao);
+    STATE_AO_GC(dev->rds->ao);
 
     /*
      * thers's no subkind of nic devices, so nic ops is always matched
@@ -340,16 +330,15 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
                                    int rc, int status)
 {
     libxl__ao_device *aodev = CONTAINER_OF(aes, *aodev, aes);
-    libxl__checkpoint_device *dev = CONTAINER_OF(aodev, *dev, aodev);
+    libxl__remus_device *dev = CONTAINER_OF(aodev, *dev, aodev);
     libxl__remus_device_nic *remus_nic = dev->concrete_data;
-    libxl__checkpoint_devices_state *cds = dev->cds;
-    libxl__remus_state *rs = cds->concrete_data;
+    libxl__remus_devices_state *rds = dev->rds;
     const char *out_path_base, *hotplug_error = NULL;
 
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
     /* Convenience aliases */
-    const uint32_t domid = cds->domid;
+    const uint32_t domid = rds->domid;
     const int devid = remus_nic->devid;
     const char *const vif = remus_nic->vif;
     const char **const ifb = &remus_nic->ifb;
@@ -371,8 +360,8 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
 
     if (!(*ifb)) {
-        LOGD(ERROR, domid, "Cannot get ifb dev name for domain %u dev %s",
-             domid, vif);
+        LOG(ERROR, "Cannot get ifb dev name for domain %u dev %s",
+            domid, vif);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -387,8 +376,8 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
 
     if (hotplug_error) {
-        LOGD(ERROR, domid, "netbuf script %s setup failed for vif %s: %s",
-             rs->netbufscript, vif, hotplug_error);
+        LOG(ERROR, "netbuf script %s setup failed for vif %s: %s",
+            rds->netbufscript, vif, hotplug_error);
         rc = ERROR_FAIL;
         goto out;
     }
@@ -398,18 +387,18 @@ static void netbuf_setup_script_cb(libxl__egc *egc,
         goto out;
     }
 
-    LOGD(DEBUG, domid, "%s will buffer packets from vif %s", *ifb, vif);
-    rc = init_qdisc(cds, remus_nic);
+    LOG(DEBUG, "%s will buffer packets from vif %s", *ifb, vif);
+    rc = init_qdisc(rds, remus_nic);
 
 out:
     aodev->rc = rc;
     aodev->callback(egc, aodev);
 }
 
-static void nic_teardown(libxl__egc *egc, libxl__checkpoint_device *dev)
+static void nic_teardown(libxl__egc *egc, libxl__remus_device *dev)
 {
     int rc;
-    STATE_AO_GC(dev->cds->ao);
+    STATE_AO_GC(dev->rds->ao);
 
     setup_async_exec(dev, "teardown");
 
@@ -429,7 +418,7 @@ static void netbuf_teardown_script_cb(libxl__egc *egc,
                                       int rc, int status)
 {
     libxl__ao_device *aodev = CONTAINER_OF(aes, *aodev, aes);
-    libxl__checkpoint_device *dev = CONTAINER_OF(aodev, *dev, aodev);
+    libxl__remus_device *dev = CONTAINER_OF(aodev, *dev, aodev);
     libxl__remus_device_nic *remus_nic = dev->concrete_data;
 
     if (status && !rc)
@@ -452,13 +441,12 @@ enum {
 /* API implementations */
 
 static int remus_netbuf_op(libxl__remus_device_nic *remus_nic,
-                           libxl__checkpoint_devices_state *cds,
+                           libxl__remus_devices_state *rds,
                            int buffer_op)
 {
     int rc, ret;
-    libxl__remus_state *rs = cds->concrete_data;
 
-    STATE_AO_GC(cds->ao);
+    STATE_AO_GC(rds->ao);
 
     if (buffer_op == tc_buffer_start)
         ret = rtnl_qdisc_plug_buffer(remus_nic->qdisc);
@@ -470,7 +458,7 @@ static int remus_netbuf_op(libxl__remus_device_nic *remus_nic,
         goto out;
     }
 
-    ret = rtnl_qdisc_add(rs->nlsock, remus_nic->qdisc, NLM_F_REQUEST);
+    ret = rtnl_qdisc_add(rds->nlsock, remus_nic->qdisc, NLM_F_REQUEST);
     if (ret) {
         rc = ERROR_FAIL;
         goto out;
@@ -480,40 +468,40 @@ static int remus_netbuf_op(libxl__remus_device_nic *remus_nic,
 
 out:
     if (rc)
-        LOGD(ERROR, cds-> domid, "Remus: cannot do netbuf op %s on %s:%s",
-             ((buffer_op == tc_buffer_start) ?
-             "start_new_epoch" : "release_prev_epoch"),
-             remus_nic->ifb, nl_geterror(ret));
+        LOG(ERROR, "Remus: cannot do netbuf op %s on %s:%s",
+            ((buffer_op == tc_buffer_start) ?
+            "start_new_epoch" : "release_prev_epoch"),
+            remus_nic->ifb, nl_geterror(ret));
     return rc;
 }
 
-static void nic_postsuspend(libxl__egc *egc, libxl__checkpoint_device *dev)
+static void nic_postsuspend(libxl__egc *egc, libxl__remus_device *dev)
 {
     int rc;
     libxl__remus_device_nic *remus_nic = dev->concrete_data;
 
-    STATE_AO_GC(dev->cds->ao);
+    STATE_AO_GC(dev->rds->ao);
 
-    rc = remus_netbuf_op(remus_nic, dev->cds, tc_buffer_start);
+    rc = remus_netbuf_op(remus_nic, dev->rds, tc_buffer_start);
 
     dev->aodev.rc = rc;
     dev->aodev.callback(egc, &dev->aodev);
 }
 
-static void nic_commit(libxl__egc *egc, libxl__checkpoint_device *dev)
+static void nic_commit(libxl__egc *egc, libxl__remus_device *dev)
 {
     int rc;
     libxl__remus_device_nic *remus_nic = dev->concrete_data;
 
-    STATE_AO_GC(dev->cds->ao);
+    STATE_AO_GC(dev->rds->ao);
 
-    rc = remus_netbuf_op(remus_nic, dev->cds, tc_buffer_release);
+    rc = remus_netbuf_op(remus_nic, dev->rds, tc_buffer_release);
 
     dev->aodev.rc = rc;
     dev->aodev.callback(egc, &dev->aodev);
 }
 
-const libxl__checkpoint_device_instance_ops remus_device_nic = {
+const libxl__remus_device_instance_ops remus_device_nic = {
     .kind = LIBXL__DEVICE_KIND_VIF,
     .setup = nic_setup,
     .teardown = nic_teardown,

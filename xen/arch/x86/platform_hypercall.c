@@ -6,6 +6,7 @@
  * Copyright (c) 2002-2006, K Fraser
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -33,20 +34,6 @@
 #include "cpu/mtrr/mtrr.h"
 #include <xsm/xsm.h>
 
-/* Declarations for items shared with the compat mode handler. */
-extern spinlock_t xenpf_lock;
-
-#define RESOURCE_ACCESS_MAX_ENTRIES 3
-struct resource_access {
-    unsigned int nr_done;
-    unsigned int nr_entries;
-    xenpf_resource_entry_t *entries;
-};
-
-long cpu_frequency_change_helper(void *);
-void check_resource_access(struct resource_access *);
-void resource_access(void *);
-
 #ifndef COMPAT
 typedef long ret_t;
 DEFINE_SPINLOCK(xenpf_lock);
@@ -56,11 +43,31 @@ DEFINE_SPINLOCK(xenpf_lock);
 # define copy_to_compat copy_to_guest
 # undef guest_from_compat_handle
 # define guest_from_compat_handle(x,y) ((x)=(y))
+#else
+extern spinlock_t xenpf_lock;
+#endif
 
-long cpu_frequency_change_helper(void *data)
+static DEFINE_PER_CPU(uint64_t, freq);
+
+static long cpu_frequency_change_helper(void *data)
 {
-    return cpu_frequency_change((uint64_t)data);
+    return cpu_frequency_change(this_cpu(freq));
 }
+
+/* from sysctl.c */
+long cpu_up_helper(void *data);
+long cpu_down_helper(void *data);
+
+/* from core_parking.c */
+long core_parking_helper(void *data);
+uint32_t get_cur_idle_nums(void);
+
+#define RESOURCE_ACCESS_MAX_ENTRIES 3
+struct xen_resource_access {
+    unsigned int nr_done;
+    unsigned int nr_entries;
+    xenpf_resource_entry_t *entries;
+};
 
 static bool_t allow_access_msr(unsigned int msr)
 {
@@ -76,7 +83,7 @@ static bool_t allow_access_msr(unsigned int msr)
     return 0;
 }
 
-void check_resource_access(struct resource_access *ra)
+static void check_resource_access(struct xen_resource_access *ra)
 {
     unsigned int i;
 
@@ -115,9 +122,9 @@ void check_resource_access(struct resource_access *ra)
     ra->nr_done = i;
 }
 
-void resource_access(void *info)
+static void resource_access(void *info)
 {
-    struct resource_access *ra = info;
+    struct xen_resource_access *ra = info;
     unsigned int i;
     u64 tsc = 0;
 
@@ -178,7 +185,6 @@ void resource_access(void *info)
 
     ra->nr_done = i;
 }
-#endif
 
 ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 {
@@ -451,9 +457,10 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         ret = -EINVAL;
         if ( op->u.change_freq.flags || !cpu_online(op->u.change_freq.cpu) )
             break;
+        per_cpu(freq, op->u.change_freq.cpu) = op->u.change_freq.freq;
         ret = continue_hypercall_on_cpu(op->u.change_freq.cpu,
                                         cpu_frequency_change_helper,
-                                        (void *)op->u.change_freq.freq);
+                                        NULL);
         break;
 
     case XENPF_getidletime:
@@ -630,8 +637,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         if ( ret )
             break;
 
-        if ( cpu >= nr_cpu_ids || !cpu_present(cpu) ||
-             clocksource_is_tsc() )
+        if ( cpu >= nr_cpu_ids || !cpu_present(cpu) )
         {
             ret = -EINVAL;
             break;
@@ -728,7 +734,7 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
 
     case XENPF_resource_op:
     {
-        struct resource_access ra;
+        struct xen_resource_access ra;
         unsigned int cpu;
         XEN_GUEST_HANDLE(xenpf_resource_entry_t) guest_entries;
 
@@ -798,13 +804,12 @@ ret_t do_platform_op(XEN_GUEST_HANDLE_PARAM(xen_platform_op_t) u_xenpf_op)
         static char name[KSYM_NAME_LEN + 1]; /* protected by xenpf_lock */
         XEN_GUEST_HANDLE(char) nameh;
         uint32_t namelen, copylen;
-        unsigned long addr;
 
         guest_from_compat_handle(nameh, op->u.symdata.name);
 
         ret = xensyms_read(&op->u.symdata.symnum, &op->u.symdata.type,
-                           &addr, name);
-        op->u.symdata.address = addr;
+                           &op->u.symdata.address, name);
+
         namelen = strlen(name) + 1;
 
         if ( namelen > op->u.symdata.namelen )

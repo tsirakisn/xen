@@ -24,8 +24,8 @@
 #include <xen/guest_access.h>
 #include <xen/hypercall.h>
 #include <xen/vm_event.h>
-#include <xen/mem_access.h>
 #include <public/memory.h>
+#include <asm/p2m.h>
 #include <xsm/xsm.h>
 
 int mem_access_memop(unsigned long cmd,
@@ -67,18 +67,7 @@ int mem_access_memop(unsigned long cmd,
             break;
 
         rc = p2m_set_mem_access(d, _gfn(mao.pfn), mao.nr, start_iter,
-                                MEMOP_CMD_MASK, mao.access, 0);
-        if ( rc > 0 )
-        {
-            ASSERT(!(rc & MEMOP_CMD_MASK));
-            rc = hypercall_create_continuation(__HYPERVISOR_memory_op, "lh",
-                                               XENMEM_access_op | rc, arg);
-        }
-        break;
-
-    case XENMEM_access_op_set_access_multi:
-        rc = p2m_set_mem_access_multi(d, mao.pfn_list, mao.access_list, mao.nr,
-                                      start_iter, MEMOP_CMD_MASK, 0);
+                                MEMOP_CMD_MASK, mao.access);
         if ( rc > 0 )
         {
             ASSERT(!(rc & MEMOP_CMD_MASK));
@@ -109,6 +98,14 @@ int mem_access_memop(unsigned long cmd,
         break;
     }
 
+    case XENMEM_access_op_enable_emulate:
+        rc = p2m_mem_access_enable_emulate(d);
+        break;
+
+    case XENMEM_access_op_disable_emulate:
+        rc = p2m_mem_access_disable_emulate(d);
+        break;
+
     default:
         rc = -ENOSYS;
         break;
@@ -117,6 +114,17 @@ int mem_access_memop(unsigned long cmd,
  out:
     rcu_unlock_domain(d);
     return rc;
+}
+
+int mem_access_send_req(struct domain *d, vm_event_request_t *req)
+{
+    int rc = vm_event_claim_slot(d, &d->vm_event->monitor);
+    if ( rc < 0 )
+        return rc;
+
+    vm_event_put_request(d, &d->vm_event->monitor, req);
+
+    return 0;
 }
 
 /*

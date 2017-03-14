@@ -18,11 +18,10 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* Allow uniquely identifying static symbols in the 3 generated objects. */
-asm(".file \"" __OBJECT_FILE__ "\"");
 
 #include <xen/domain_page.h>
 #include <xen/paging.h>
+#include <xen/config.h>
 #include <xen/sched.h>
 #include "private.h" /* for hap_gva_to_gfn_* */
 
@@ -69,24 +68,24 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
         if ( top_page )
             put_page(top_page);
         p2m_mem_paging_populate(p2m->domain, cr3 >> PAGE_SHIFT);
-        return gfn_x(INVALID_GFN);
+        return INVALID_GFN;
     }
     if ( p2m_is_shared(p2mt) )
     {
         pfec[0] = PFEC_page_shared;
         if ( top_page )
             put_page(top_page);
-        return gfn_x(INVALID_GFN);
+        return INVALID_GFN;
     }
     if ( !top_page )
     {
         pfec[0] &= ~PFEC_page_present;
-        goto out_tweak_pfec;
+        return INVALID_GFN;
     }
     top_mfn = _mfn(page_to_mfn(top_page));
 
     /* Map the top-level table and call the tree-walker */
-    ASSERT(mfn_valid(top_mfn));
+    ASSERT(mfn_valid(mfn_x(top_mfn)));
     top_map = map_domain_page(top_mfn);
 #if GUEST_PAGING_LEVELS == 3
     top_map += (cr3 & ~(PAGE_MASK | 31));
@@ -98,7 +97,7 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     /* Interpret the answer */
     if ( missing == 0 )
     {
-        gfn_t gfn = guest_walk_to_gfn(&gw);
+        gfn_t gfn = guest_l1e_get_gfn(gw.l1e);
         struct page_info *page;
         page = get_page_from_gfn_p2m(p2m->domain, p2m, gfn_x(gfn), &p2mt,
                                      NULL, P2M_ALLOC | P2M_UNSHARE);
@@ -109,12 +108,12 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
             ASSERT(p2m_is_hostp2m(p2m));
             pfec[0] = PFEC_page_paged;
             p2m_mem_paging_populate(p2m->domain, gfn_x(gfn));
-            return gfn_x(INVALID_GFN);
+            return INVALID_GFN;
         }
         if ( p2m_is_shared(p2mt) )
         {
             pfec[0] = PFEC_page_shared;
-            return gfn_x(INVALID_GFN);
+            return INVALID_GFN;
         }
 
         if ( page_order )
@@ -129,24 +128,13 @@ unsigned long hap_p2m_ga_to_gfn(GUEST_PAGING_LEVELS)(
     if ( missing & _PAGE_INVALID_BITS ) 
         pfec[0] |= PFEC_reserved_bit;
 
-    if ( missing & _PAGE_PKEY_BITS )
-        pfec[0] |= PFEC_prot_key;
-
     if ( missing & _PAGE_PAGED )
         pfec[0] = PFEC_page_paged;
 
     if ( missing & _PAGE_SHARED )
         pfec[0] = PFEC_page_shared;
 
- out_tweak_pfec:
-    /*
-     * SDM Intel 64 Volume 3, Chapter Paging, PAGE-FAULT EXCEPTIONS:
-     * The PFEC_insn_fetch flag is set only when NX or SMEP are enabled.
-     */
-    if ( !hvm_nx_enabled(v) && !hvm_smep_enabled(v) )
-        pfec[0] &= ~PFEC_insn_fetch;
-
-    return gfn_x(INVALID_GFN);
+    return INVALID_GFN;
 }
 
 

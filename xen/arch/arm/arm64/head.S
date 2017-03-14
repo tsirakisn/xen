@@ -20,6 +20,7 @@
  * GNU General Public License for more details.
  */
 
+#include <asm/config.h>
 #include <asm/page.h>
 #include <asm/asm_defns.h>
 #include <asm/early_printk.h>
@@ -64,7 +65,7 @@
  *  x23 - UART address
  *  x24 - cpuid
  *  x25 - identity map in place
- *  x26 - skip_zero_bss
+ *  x26 -
  *  x27 -
  *  x28 -
  *  x29 -
@@ -231,10 +232,6 @@ section_table:
         .long   0xe0500020       /* Characteristics (section flags) */
         .align  5
 real_start:
-        /* BSS should be zeroed when booting without EFI */
-        mov   x26, #0                /* x26 := skip_zero_bss */
-
-real_start_efi:
         msr   DAIFSet, 0xf           /* Disable all interrupts */
 
         /* Save the bootloader arguments in less-clobberable registers */
@@ -264,17 +261,16 @@ GLOBAL(init_secondary)
         sub   x20, x19, x0           /* x20 := phys-offset */
 
         mov   x22, #1                /* x22 := is_secondary_cpu */
-        /* Boot CPU already zero BSS so skip it on secondary CPUs. */
-        mov   x26, #1                /* X26 := skip_zero_bss */
 
 common_start:
         mov   x24, #0                /* x24 := CPU ID. Initialy zero until we
                                       * find that multiprocessor extensions are
                                       * present and the system is SMP  */
         mrs   x0, mpidr_el1
+        tbz   x0, _MPIDR_SMP, 1f     /* Multiprocessor extension not supported? */
         tbnz  x0, _MPIDR_UP, 1f      /* Uniprocessor system? */
 
-        ldr   x13, =(~MPIDR_HWID_MASK)
+        mov   x13, #(~MPIDR_HWID_MASK)
         bic   x24, x0, x13           /* Mask out flags to get CPU ID */
 1:
 
@@ -319,8 +315,8 @@ common_start:
 
 el2:    PRINT("- Xen starting at EL2 -\r\n")
 
-        /* Zero BSS only when requested */
-        cbnz  x26, skip_bss
+        /* Zero BSS On the boot CPU to avoid nasty surprises */
+        cbnz  x22, skip_bss
 
         PRINT("- Zero BSS -\r\n")
         ldr   x0, =__bss_start       /* Load start & end of bss */
@@ -346,8 +342,8 @@ skip_bss:
          * Top byte is used
          * PT walks use Inner-Shareable accesses,
          * PT walks are write-back, write-allocate in both cache levels,
-         * 48-bit virtual address space goes through this table. */
-        ldr   x0, =(TCR_RES1|TCR_SH0_IS|TCR_ORGN0_WBWA|TCR_IRGN0_WBWA|TCR_T0SZ(64-48))
+         * Full 64-bit address space goes through this table. */
+        ldr   x0, =(TCR_RES1|TCR_SH0_IS|TCR_ORGN0_WBWA|TCR_IRGN0_WBWA|TCR_T0SZ(0))
         /* ID_AA64MMFR0_EL1[3:0] (PARange) corresponds to TCR_EL2[18:16] (PS) */
         mrs   x1, ID_AA64MMFR0_EL1
         bfi   x0, x1, #16, #3
@@ -604,9 +600,7 @@ launch:
         mov   x0, x20                /* Marshal args: - phys_offset */
         mov   x1, x21                /*               - FDT */
         mov   x2, x24                /*               - CPU ID */
-        cbnz  x22, 1f
-        b     start_xen              /* and disappear into the land of C */
-1:
+        cbz   x22, start_xen         /* and disappear into the land of C */
         b     start_secondary        /* (to the appropriate entry point) */
 
 /* Fail-stop */
@@ -792,16 +786,7 @@ ENTRY(efi_xen_start)
         mov   x1, xzr
         mov   x2, xzr
         mov   x3, xzr
-        /*
-         * The EFI stub and Xen may share some information living in
-         * BSS. Don't zero BSS to avoid loosing them.
-         *
-         * Note that the EFI firmware has already zeroed BSS for us
-         * before jump into the stub.
-         */
-        mov   x26, #1               /* x26 := skip_zero_bss */
-
-        b     real_start_efi
+        b     real_start
 ENDPROC(efi_xen_start)
 
 /*

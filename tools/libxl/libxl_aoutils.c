@@ -603,6 +603,8 @@ int libxl__async_exec_start(libxl__async_exec_state *aes)
         /* child */
         libxl__exec(gc, aes->stdfds[0], aes->stdfds[1],
                     aes->stdfds[2], args[0], args, aes->env);
+        /* notreached */
+        abort();
     }
 
     return 0;

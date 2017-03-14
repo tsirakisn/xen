@@ -88,10 +88,8 @@ unsigned long xc_translate_foreign_address(xc_interface *xch, uint32_t dom,
             return 0;
         memcpy(&pte, map + (paddr & (PAGE_SIZE - 1)), size);
         munmap(map, PAGE_SIZE);
-        if (!(pte & 1)) {
-            errno = EADDRNOTAVAIL;
+        if (!(pte & 1)) 
             return 0;
-        }
         paddr = pte & 0x000ffffffffff000ull;
         if (level == 2 && (pte & PTE_PSE)) {
             mask = ((mask ^ ~-mask) >> 1); /* All bits below first set bit */

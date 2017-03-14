@@ -21,16 +21,9 @@
 
 #define PSR_CMT        (1<<0)
 #define PSR_CAT        (1<<1)
-#define PSR_CDP        (1<<2)
 
 struct psr_cat_cbm {
-    union {
-        uint64_t cbm;
-        struct {
-            uint64_t code;
-            uint64_t data;
-        };
-    };
+    uint64_t cbm;
     unsigned int ref;
 };
 
@@ -50,9 +43,8 @@ struct psr_cmt *__read_mostly psr_cmt;
 
 static unsigned long *__read_mostly cat_socket_enable;
 static struct psr_cat_socket_info *__read_mostly cat_socket_info;
-static unsigned long *__read_mostly cdp_socket_enable;
 
-static unsigned int opt_psr;
+static unsigned int __initdata opt_psr;
 static unsigned int __initdata opt_rmid_max = 255;
 static unsigned int __read_mostly opt_cos_max = 255;
 static uint64_t rmid_mask;
@@ -102,7 +94,6 @@ static void __init parse_psr_param(char *s)
 
         parse_psr_bool(s, val_str, "cmt", PSR_CMT);
         parse_psr_bool(s, val_str, "cat", PSR_CAT);
-        parse_psr_bool(s, val_str, "cdp", PSR_CDP);
 
         if ( val_str && !strcmp(s, "rmid_max") )
             opt_rmid_max = simple_strtoul(val_str, NULL, 0);
@@ -120,7 +111,7 @@ static void __init init_psr_cmt(unsigned int rmid_max)
     unsigned int eax, ebx, ecx, edx;
     unsigned int rmid;
 
-    if ( !boot_cpu_has(X86_FEATURE_PQM) )
+    if ( !boot_cpu_has(X86_FEATURE_CMT) )
         return;
 
     cpuid_count(0xf, 0, &eax, &ebx, &ecx, &edx);
@@ -270,13 +261,8 @@ static struct psr_cat_socket_info *get_cat_socket_info(unsigned int socket)
     return cat_socket_info + socket;
 }
 
-static inline bool_t cdp_is_enabled(unsigned int socket)
-{
-    return cdp_socket_enable && test_bit(socket, cdp_socket_enable);
-}
-
 int psr_get_cat_l3_info(unsigned int socket, uint32_t *cbm_len,
-                        uint32_t *cos_max, uint32_t *flags)
+                        uint32_t *cos_max)
 {
     struct psr_cat_socket_info *info = get_cat_socket_info(socket);
 
@@ -286,47 +272,17 @@ int psr_get_cat_l3_info(unsigned int socket, uint32_t *cbm_len,
     *cbm_len = info->cbm_len;
     *cos_max = info->cos_max;
 
-    *flags = 0;
-    if ( cdp_is_enabled(socket) )
-        *flags |= XEN_SYSCTL_PSR_CAT_L3_CDP;
-
     return 0;
 }
 
-int psr_get_l3_cbm(struct domain *d, unsigned int socket,
-                   uint64_t *cbm, enum cbm_type type)
+int psr_get_l3_cbm(struct domain *d, unsigned int socket, uint64_t *cbm)
 {
     struct psr_cat_socket_info *info = get_cat_socket_info(socket);
-    bool_t cdp_enabled = cdp_is_enabled(socket);
 
     if ( IS_ERR(info) )
         return PTR_ERR(info);
 
-    switch ( type )
-    {
-    case PSR_CBM_TYPE_L3:
-        if ( cdp_enabled )
-            return -EXDEV;
-        *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].cbm;
-        break;
-
-    case PSR_CBM_TYPE_L3_CODE:
-        if ( !cdp_enabled )
-            *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].cbm;
-        else
-            *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].code;
-        break;
-
-    case PSR_CBM_TYPE_L3_DATA:
-        if ( !cdp_enabled )
-            *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].cbm;
-        else
-            *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].data;
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-    }
+    *cbm = info->cos_to_cbm[d->arch.psr_cos_ids[socket]].cbm;
 
     return 0;
 }
@@ -357,34 +313,19 @@ static bool_t psr_check_cbm(unsigned int cbm_len, uint64_t cbm)
 struct cos_cbm_info
 {
     unsigned int cos;
-    bool_t cdp;
-    uint64_t cbm_code;
-    uint64_t cbm_data;
+    uint64_t cbm;
 };
 
 static void do_write_l3_cbm(void *data)
 {
     struct cos_cbm_info *info = data;
 
-    if ( info->cdp )
-    {
-        wrmsrl(MSR_IA32_PSR_L3_MASK_CODE(info->cos), info->cbm_code);
-        wrmsrl(MSR_IA32_PSR_L3_MASK_DATA(info->cos), info->cbm_data);
-    }
-    else
-        wrmsrl(MSR_IA32_PSR_L3_MASK(info->cos), info->cbm_code);
+    wrmsrl(MSR_IA32_PSR_L3_MASK(info->cos), info->cbm);
 }
 
-static int write_l3_cbm(unsigned int socket, unsigned int cos,
-                        uint64_t cbm_code, uint64_t cbm_data, bool_t cdp)
+static int write_l3_cbm(unsigned int socket, unsigned int cos, uint64_t cbm)
 {
-    struct cos_cbm_info info =
-    {
-        .cos = cos,
-        .cbm_code = cbm_code,
-        .cbm_data = cbm_data,
-        .cdp = cdp,
-    };
+    struct cos_cbm_info info = { .cos = cos, .cbm = cbm };
 
     if ( socket == cpu_to_socket(smp_processor_id()) )
         do_write_l3_cbm(&info);
@@ -400,48 +341,10 @@ static int write_l3_cbm(unsigned int socket, unsigned int cos,
     return 0;
 }
 
-static int find_cos(struct psr_cat_cbm *map, unsigned int cos_max,
-                    uint64_t cbm_code, uint64_t cbm_data, bool_t cdp_enabled)
+int psr_set_l3_cbm(struct domain *d, unsigned int socket, uint64_t cbm)
 {
-    unsigned int cos;
-
-    for ( cos = 0; cos <= cos_max; cos++ )
-    {
-        if ( (map[cos].ref || cos == 0) &&
-             ((!cdp_enabled && map[cos].cbm == cbm_code) ||
-              (cdp_enabled && map[cos].code == cbm_code &&
-                              map[cos].data == cbm_data)) )
-            return cos;
-    }
-
-    return -ENOENT;
-}
-
-static int pick_avail_cos(struct psr_cat_cbm *map, unsigned int cos_max,
-                          unsigned int old_cos)
-{
-    unsigned int cos;
-
-    /* If old cos is referred only by the domain, then use it. */
-    if ( map[old_cos].ref == 1 && old_cos != 0 )
-        return old_cos;
-
-    /* Find an unused one other than cos0. */
-    for ( cos = 1; cos <= cos_max; cos++ )
-        if ( map[cos].ref == 0 )
-            return cos;
-
-    return -ENOENT;
-}
-
-int psr_set_l3_cbm(struct domain *d, unsigned int socket,
-                   uint64_t cbm, enum cbm_type type)
-{
-    unsigned int old_cos, cos_max;
-    int cos, ret;
-    uint64_t cbm_data, cbm_code;
-    bool_t cdp_enabled = cdp_is_enabled(socket);
-    struct psr_cat_cbm *map;
+    unsigned int old_cos, cos;
+    struct psr_cat_cbm *map, *found = NULL;
     struct psr_cat_socket_info *info = get_cat_socket_info(socket);
 
     if ( IS_ERR(info) )
@@ -450,72 +353,53 @@ int psr_set_l3_cbm(struct domain *d, unsigned int socket,
     if ( !psr_check_cbm(info->cbm_len, cbm) )
         return -EINVAL;
 
-    if ( !cdp_enabled && (type == PSR_CBM_TYPE_L3_CODE ||
-                          type == PSR_CBM_TYPE_L3_DATA) )
-        return -ENXIO;
-
-    cos_max = info->cos_max;
     old_cos = d->arch.psr_cos_ids[socket];
     map = info->cos_to_cbm;
 
-    switch ( type )
-    {
-    case PSR_CBM_TYPE_L3:
-        cbm_code = cbm;
-        cbm_data = cbm;
-        break;
-
-    case PSR_CBM_TYPE_L3_CODE:
-        cbm_code = cbm;
-        cbm_data = map[old_cos].data;
-        break;
-
-    case PSR_CBM_TYPE_L3_DATA:
-        cbm_code = map[old_cos].code;
-        cbm_data = cbm;
-        break;
-
-    default:
-        ASSERT_UNREACHABLE();
-        return -EINVAL;
-    }
-
     spin_lock(&info->cbm_lock);
-    cos = find_cos(map, cos_max, cbm_code, cbm_data, cdp_enabled);
-    if ( cos >= 0 )
-    {
-        if ( cos == old_cos )
-        {
-            spin_unlock(&info->cbm_lock);
-            return 0;
-        }
-    }
-    else
-    {
-        cos = pick_avail_cos(map, cos_max, old_cos);
-        if ( cos < 0 )
-        {
-            spin_unlock(&info->cbm_lock);
-            return cos;
-        }
 
-        /* We try to avoid writing MSR. */
-        if ( (cdp_enabled &&
-             (map[cos].code != cbm_code || map[cos].data != cbm_data)) ||
-             (!cdp_enabled && map[cos].cbm != cbm_code) )
+    for ( cos = 0; cos <= info->cos_max; cos++ )
+    {
+        /* If still not found, then keep unused one. */
+        if ( !found && cos != 0 && map[cos].ref == 0 )
+            found = map + cos;
+        else if ( map[cos].cbm == cbm )
         {
-            ret = write_l3_cbm(socket, cos, cbm_code, cbm_data, cdp_enabled);
-            if ( ret )
+            if ( unlikely(cos == old_cos) )
             {
+                ASSERT(cos == 0 || map[cos].ref != 0);
                 spin_unlock(&info->cbm_lock);
-                return ret;
+                return 0;
             }
-            map[cos].code = cbm_code;
-            map[cos].data = cbm_data;
+            found = map + cos;
+            break;
         }
     }
 
-    map[cos].ref++;
+    /* If old cos is referred only by the domain, then use it. */
+    if ( !found && map[old_cos].ref == 1 )
+        found = map + old_cos;
+
+    if ( !found )
+    {
+        spin_unlock(&info->cbm_lock);
+        return -EOVERFLOW;
+    }
+
+    cos = found - map;
+    if ( found->cbm != cbm )
+    {
+        int ret = write_l3_cbm(socket, cos, cbm);
+
+        if ( ret )
+        {
+            spin_unlock(&info->cbm_lock);
+            return ret;
+        }
+        found->cbm = cbm;
+    }
+
+    found->ref++;
     map[old_cos].ref--;
     spin_unlock(&info->cbm_lock);
 
@@ -586,10 +470,9 @@ static void cat_cpu_init(void)
     struct psr_cat_socket_info *info;
     unsigned int socket;
     unsigned int cpu = smp_processor_id();
-    uint64_t val;
     const struct cpuinfo_x86 *c = cpu_data + cpu;
 
-    if ( !cpu_has(c, X86_FEATURE_PQE) || c->cpuid_level < PSR_CPUID_LEVEL_CAT )
+    if ( !cpu_has(c, X86_FEATURE_CAT) || c->cpuid_level < PSR_CPUID_LEVEL_CAT )
         return;
 
     socket = cpu_to_socket(cpu);
@@ -612,27 +495,8 @@ static void cat_cpu_init(void)
         spin_lock_init(&info->cbm_lock);
 
         set_bit(socket, cat_socket_enable);
-
-        if ( (ecx & PSR_CAT_CDP_CAPABILITY) && (opt_psr & PSR_CDP) &&
-             cdp_socket_enable && !test_bit(socket, cdp_socket_enable) )
-        {
-            info->cos_to_cbm[0].code = (1ull << info->cbm_len) - 1;
-            info->cos_to_cbm[0].data = (1ull << info->cbm_len) - 1;
-
-            /* We only write mask1 since mask0 is always all ones by default. */
-            wrmsrl(MSR_IA32_PSR_L3_MASK(1), (1ull << info->cbm_len) - 1);
-
-            rdmsrl(MSR_IA32_PSR_L3_QOS_CFG, val);
-            wrmsrl(MSR_IA32_PSR_L3_QOS_CFG, val | (1 << PSR_L3_QOS_CDP_ENABLE_BIT));
-
-            /* Cut half of cos_max when CDP is enabled. */
-            info->cos_max >>= 1;
-
-            set_bit(socket, cdp_socket_enable);
-        }
-        printk(XENLOG_INFO "CAT: enabled on socket %u, cos_max:%u, cbm_len:%u, CDP:%s\n",
-               socket, info->cos_max, info->cbm_len,
-               cdp_is_enabled(socket) ? "on" : "off");
+        printk(XENLOG_INFO "CAT: enabled on socket %u, cos_max:%u, cbm_len:%u\n",
+               socket, info->cos_max, info->cbm_len);
     }
 }
 
@@ -649,10 +513,6 @@ static void cat_cpu_fini(unsigned int cpu)
             xfree(info->cos_to_cbm);
             info->cos_to_cbm = NULL;
         }
-
-        if ( cdp_is_enabled(socket) )
-            clear_bit(socket, cdp_socket_enable);
-
         clear_bit(socket, cat_socket_enable);
     }
 }
@@ -675,7 +535,6 @@ static void __init init_psr_cat(void)
 
     cat_socket_enable = xzalloc_array(unsigned long, BITS_TO_LONGS(nr_sockets));
     cat_socket_info = xzalloc_array(struct psr_cat_socket_info, nr_sockets);
-    cdp_socket_enable = xzalloc_array(unsigned long, BITS_TO_LONGS(nr_sockets));
 
     if ( !cat_socket_enable || !cat_socket_info )
         psr_cat_free();

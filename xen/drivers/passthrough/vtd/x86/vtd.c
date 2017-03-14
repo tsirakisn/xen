@@ -118,8 +118,6 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
 
     for ( i = 0; i < top; i++ )
     {
-        int rc = 0;
-
         /*
          * Set up 1:1 mapping for dom0. Default to use only conventional RAM
          * areas and let RMRRs include needed reserved regions. When set, the
@@ -129,7 +127,7 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
         unsigned long pfn = pdx_to_pfn(i);
 
         if ( pfn > (0xffffffffUL >> PAGE_SHIFT) ?
-             (!mfn_valid(_mfn(pfn)) ||
+             (!mfn_valid(pfn) ||
               !page_is_ram_type(pfn, RAM_TYPE_CONVENTIONAL)) :
              iommu_inclusive_mapping ?
              page_is_ram_type(pfn, RAM_TYPE_UNUSABLE) :
@@ -142,17 +140,8 @@ void __hwdom_init vtd_set_hwdom_mapping(struct domain *d)
 
         tmp = 1 << (PAGE_SHIFT - PAGE_SHIFT_4K);
         for ( j = 0; j < tmp; j++ )
-        {
-            int ret = iommu_map_page(d, pfn * tmp + j, pfn * tmp + j,
-                                     IOMMUF_readable|IOMMUF_writable);
-
-            if ( !rc )
-               rc = ret;
-        }
-
-        if ( rc )
-           printk(XENLOG_WARNING VTDPREFIX " d%d: IOMMU mapping failed: %d\n",
-                  d->domain_id, rc);
+            iommu_map_page(d, pfn * tmp + j, pfn * tmp + j,
+                           IOMMUF_readable|IOMMUF_writable);
 
         if (!(i & (0xfffff >> (PAGE_SHIFT - PAGE_SHIFT_4K))))
             process_pending_softirqs();

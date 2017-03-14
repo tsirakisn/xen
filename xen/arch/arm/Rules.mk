@@ -6,25 +6,43 @@
 # 'make clean' before rebuilding.
 #
 
+HAS_DEVICE_TREE := y
+HAS_VIDEO := y
+HAS_ARM_HDLCD := y
+HAS_PASSTHROUGH := y
+HAS_PDX := y
+
 CFLAGS += -I$(BASEDIR)/include
 
 $(call cc-options-add,CFLAGS,CC,$(EMBEDDED_EXTRA_CFLAGS))
 $(call cc-option-add,CFLAGS,CC,-Wnested-externs)
 
-# Prevent floating-point variables from creeping into Xen.
-CFLAGS-$(CONFIG_ARM_32) += -msoft-float
-CFLAGS-$(CONFIG_ARM_32) += -mcpu=cortex-a15
+arm := y
 
-CFLAGS-$(CONFIG_ARM_64) += -mcpu=generic
-CFLAGS-$(CONFIG_ARM_64) += -mgeneral-regs-only # No fp registers etc
+ifeq ($(TARGET_SUBARCH),arm32)
+# Prevent floating-point variables from creeping into Xen.
+CFLAGS += -msoft-float
+CFLAGS += -mcpu=cortex-a15
+arm32 := y
+arm64 := n
+endif
+
+ifeq ($(TARGET_SUBARCH),arm64)
+CFLAGS += -mcpu=generic
+CFLAGS += -mgeneral-regs-only # No fp registers etc
+arm32 := n
+arm64 := y
+endif
 
 ifneq ($(call cc-option,$(CC),-fvisibility=hidden,n),n)
 CFLAGS += -DGCC_HAS_VISIBILITY_ATTRIBUTE
 endif
 
+CFLAGS-$(HAS_GICV3) += -DHAS_GICV3
+
 EARLY_PRINTK := n
 
-ifeq ($(CONFIG_DEBUG),y)
+ifeq ($(debug),y)
 
 # See docs/misc/arm/early-printk.txt for syntax
 
@@ -32,6 +50,7 @@ EARLY_PRINTK_brcm           := 8250,0xF040AB00,2
 EARLY_PRINTK_dra7           := 8250,0x4806A000,2
 EARLY_PRINTK_fastmodel      := pl011,0x1c090000,115200
 EARLY_PRINTK_exynos5250     := exynos4210,0x12c20000
+EARLY_PRINTK_hip04-d01      := 8250,0xE4007000,2
 EARLY_PRINTK_juno           := pl011,0x7ff80000
 EARLY_PRINTK_lager          := scif,0xe6e60000
 EARLY_PRINTK_midway         := pl011,0xfff36000
@@ -77,7 +96,7 @@ CFLAGS-$(EARLY_PRINTK) += -DEARLY_PRINTK_BAUD=$(EARLY_PRINTK_BAUD)
 CFLAGS-$(EARLY_PRINTK) += -DEARLY_UART_BASE_ADDRESS=$(EARLY_UART_BASE_ADDRESS)
 CFLAGS-$(EARLY_PRINTK) += -DEARLY_UART_REG_SHIFT=$(EARLY_UART_REG_SHIFT)
 
-else # !CONFIG_DEBUG
+else # !debug
 
 ifneq ($(CONFIG_EARLY_PRINTK),)
 # Early printk is dependant on a debug build.

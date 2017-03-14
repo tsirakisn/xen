@@ -27,10 +27,10 @@
  *  can have side effects.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/sched.h>
 #include <xen/domain_page.h>
-#include <asm/hvm/ioreq.h>
 #include <asm/hvm/support.h>
 #include <xen/numa.h>
 #include <xen/paging.h>
@@ -576,10 +576,8 @@ void stdvga_init(struct domain *d)
 {
     struct hvm_hw_stdvga *s = &d->arch.hvm_domain.stdvga;
     struct page_info *pg;
-    unsigned int i;
-
-    if ( !has_vvga(d) )
-        return;
+    void *p;
+    int i;
 
     memset(s, 0, sizeof(*s));
     spin_lock_init(&s->lock);
@@ -590,7 +588,9 @@ void stdvga_init(struct domain *d)
         if ( pg == NULL )
             break;
         s->vram_page[i] = pg;
-        clear_domain_page(_mfn(page_to_mfn(pg)));
+        p = __map_domain_page(pg);
+        clear_page(p);
+        unmap_domain_page(p);
     }
 
     if ( i == ARRAY_SIZE(s->vram_page) )
@@ -617,9 +617,6 @@ void stdvga_deinit(struct domain *d)
 {
     struct hvm_hw_stdvga *s = &d->arch.hvm_domain.stdvga;
     int i;
-
-    if ( !has_vvga(d) )
-        return;
 
     for ( i = 0; i != ARRAY_SIZE(s->vram_page); i++ )
     {

@@ -33,7 +33,6 @@
 #include <public/hvm/params.h>
 #include <public/hvm/save.h>
 #include <public/hvm/hvm_op.h>
-#include <public/hvm/dm_op.h>
 
 struct hvm_ioreq_page {
     unsigned long gmfn;
@@ -48,7 +47,7 @@ struct hvm_ioreq_vcpu {
     bool_t           pending;
 };
 
-#define NR_IO_RANGE_TYPES (XEN_DMOP_IO_RANGE_PCI + 1)
+#define NR_IO_RANGE_TYPES (HVMOP_IO_RANGE_PCI + 1)
 #define MAX_NR_IO_RANGES  256
 
 struct hvm_ioreq_server {
@@ -73,33 +72,6 @@ struct hvm_ioreq_server {
     bool_t                 bufioreq_atomic;
 };
 
-/*
- * This structure defines function hooks to support hardware-assisted
- * virtual interrupt delivery to guest. (e.g. VMX PI and SVM AVIC).
- *
- * These hooks are defined by the underlying arch-specific code
- * as needed. For example:
- *   - When the domain is enabled with virtual IPI delivery
- *   - When the domain is enabled with virtual I/O int delivery
- *     and actually has a physical device assigned .
- */
-struct hvm_pi_ops {
-    /* Hook into ctx_switch_from. */
-    void (*switch_from)(struct vcpu *v);
-
-    /* Hook into ctx_switch_to. */
-    void (*switch_to)(struct vcpu *v);
-
-    /*
-     * Hook into arch_vcpu_block(), which is called
-     * from vcpu_block() and vcpu_do_poll().
-     */
-    void (*vcpu_block)(struct vcpu *);
-
-    /* Hook into the vmentry path. */
-    void (*do_resume)(struct vcpu *v);
-};
-
 struct hvm_domain {
     /* Guest page range used for non-default ioreq servers */
     struct {
@@ -118,7 +90,7 @@ struct hvm_domain {
     /* Cached CF8 for guest PCI config cycles */
     uint32_t                pci_cf8;
 
-    struct pl_time         *pl_time;
+    struct pl_time         pl_time;
 
     struct hvm_io_handler *io_handler;
     unsigned int          io_handler_count;
@@ -129,16 +101,6 @@ struct hvm_domain {
     struct hvm_hw_vpic     vpic[2]; /* 0=master; 1=slave */
     struct hvm_vioapic    *vioapic;
     struct hvm_hw_stdvga   stdvga;
-
-    /*
-     * hvm_hw_pmtimer is a publicly-visible name. We will defer renaming
-     * it to the more appropriate hvm_hw_acpi until the expected
-     * comprehensive rewrte of migration code, thus avoiding code churn
-     * in public header files.
-     * Internally, however, we will be using hvm_hw_acpi.
-     */
-#define hvm_hw_acpi hvm_hw_pmtimer
-    struct hvm_hw_acpi     acpi;
 
     /* VCPU which is current target for 8259 interrupts. */
     struct vcpu           *i8259_target;
@@ -162,6 +124,7 @@ struct hvm_domain {
 
     /* hypervisor intercepted msix table */
     struct list_head       msixtbl_list;
+    spinlock_t             msixtbl_list_lock;
 
     struct viridian_domain viridian;
 
@@ -176,17 +139,7 @@ struct hvm_domain {
      */
     uint64_t sync_tsc;
 
-    uint64_t tsc_scaling_ratio;
-
     unsigned long *io_bitmap;
-
-    /* List of permanently write-mapped pages. */
-    struct {
-        spinlock_t lock;
-        struct list_head list;
-    } write_map;
-
-    struct hvm_pi_ops pi_ops;
 
     union {
         struct vmx_domain vmx;

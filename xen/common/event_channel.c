@@ -14,6 +14,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -726,7 +727,7 @@ void send_guest_vcpu_virq(struct vcpu *v, uint32_t virq)
     spin_unlock_irqrestore(&v->virq_lock, flags);
 }
 
-static void send_guest_global_virq(struct domain *d, uint32_t virq)
+void send_guest_global_virq(struct domain *d, uint32_t virq)
 {
     unsigned long flags;
     int port;
@@ -980,28 +981,44 @@ int evtchn_unmask(unsigned int port)
 }
 
 
-int evtchn_reset(struct domain *d)
+static long evtchn_reset(evtchn_reset_t *r)
 {
-    unsigned int i;
+    domid_t dom = r->dom;
+    struct domain *d;
+    int i, rc;
 
-    if ( d != current->domain && !d->controller_pause_count )
-        return -EINVAL;
+    d = rcu_lock_domain_by_any_id(dom);
+    if ( d == NULL )
+        return -ESRCH;
+
+    rc = xsm_evtchn_reset(XSM_TARGET, current->domain, d);
+    if ( rc )
+        goto out;
 
     for ( i = 0; port_is_valid(d, i); i++ )
         evtchn_close(d, i, 1);
 
     spin_lock(&d->event_lock);
 
-    if ( d->evtchn_fifo )
+    if ( (dom == DOMID_SELF) && d->evtchn_fifo )
     {
-        /* Switching back to 2-level ABI. */
+        /*
+         * Guest domain called EVTCHNOP_reset with DOMID_SELF, destroying
+         * FIFO event array and control blocks, resetting evtchn_port_ops to
+         * evtchn_port_ops_2l.
+         */
         evtchn_fifo_destroy(d);
         evtchn_2l_init(d);
     }
 
     spin_unlock(&d->event_lock);
 
-    return 0;
+    rc = 0;
+
+out:
+    rcu_unlock_domain(d);
+
+    return rc;
 }
 
 static long evtchn_set_priority(const struct evtchn_set_priority *set_priority)
@@ -1126,20 +1143,9 @@ long do_event_channel_op(int cmd, XEN_GUEST_HANDLE_PARAM(void) arg)
 
     case EVTCHNOP_reset: {
         struct evtchn_reset reset;
-        struct domain *d;
-
         if ( copy_from_guest(&reset, arg, 1) != 0 )
             return -EFAULT;
-
-        d = rcu_lock_domain_by_any_id(reset.dom);
-        if ( d == NULL )
-            return -ESRCH;
-
-        rc = xsm_evtchn_reset(XSM_TARGET, current->domain, d);
-        if ( !rc )
-            rc = evtchn_reset(d);
-
-        rcu_unlock_domain(d);
+        rc = evtchn_reset(&reset);
         break;
     }
 
@@ -1431,9 +1437,15 @@ static void dump_evtchn_info(unsigned char key)
     rcu_read_unlock(&domlist_read_lock);
 }
 
+static struct keyhandler dump_evtchn_info_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_evtchn_info,
+    .desc = "dump evtchn info"
+};
+
 static int __init dump_evtchn_info_key_init(void)
 {
-    register_keyhandler('e', dump_evtchn_info, "dump evtchn info", 1);
+    register_keyhandler('e', &dump_evtchn_info_keyhandler);
     return 0;
 }
 __initcall(dump_evtchn_info_key_init);

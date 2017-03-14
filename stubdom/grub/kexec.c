@@ -100,9 +100,9 @@ static void do_exchange(struct xc_dom_image *dom, xen_pfn_t target_pfn, xen_pfn_
     dom->p2m_host[target_pfn] = source_mfn;
 }
 
-int kexec_allocate(struct xc_dom_image *dom)
+int kexec_allocate(struct xc_dom_image *dom, xen_vaddr_t up_to)
 {
-    unsigned long new_allocated = dom->pfn_alloc_end - dom->rambase_pfn;
+    unsigned long new_allocated = (up_to - dom->parms.virt_base) / PAGE_SIZE;
     unsigned long i;
 
     pages = realloc(pages, new_allocated * sizeof(*pages));
@@ -246,37 +246,33 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     tpm_hash2pcr(dom, cmdline);
 
     if ( (rc = xc_dom_boot_xen_init(dom, xc_handle, domid)) != 0 ) {
-        printk("xc_dom_boot_xen_init returned %d\n", rc);
+        grub_printf("xc_dom_boot_xen_init returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
     if ( (rc = xc_dom_parse_image(dom)) != 0 ) {
-        printk("xc_dom_parse_image returned %d\n", rc);
+        grub_printf("xc_dom_parse_image returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
 
 #ifdef __i386__
     if (strcmp(dom->guest_type, "xen-3.0-x86_32p")) {
-        printk("can only boot x86 32 PAE kernels, not %s\n", dom->guest_type);
+        grub_printf("can only boot x86 32 PAE kernels, not %s\n", dom->guest_type);
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
 #endif
 #ifdef __x86_64__
     if (strcmp(dom->guest_type, "xen-3.0-x86_64")) {
-        printk("can only boot x86 64 kernels, not %s\n", dom->guest_type);
+        grub_printf("can only boot x86 64 kernels, not %s\n", dom->guest_type);
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
 #endif
 
     /* equivalent of xc_dom_mem_init */
-    if (xc_dom_set_arch_hooks(dom)) {
-        printk("xc_dom_set_arch_hooks failed\n");
-        errnum = ERR_EXEC_FORMAT;
-        goto out;
-    }
+    dom->arch_hooks = xc_dom_find_arch_hooks(xc_handle, dom->guest_type);
     dom->total_pages = start_info.nr_pages;
 
     /* equivalent of arch_setup_meminit */
@@ -290,7 +286,7 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
         dom->p2m_host[i] = pfn_to_mfn(i);
 
     if ( (rc = xc_dom_build_image(dom)) != 0 ) {
-        printk("xc_dom_build_image returned %d\n", rc);
+        grub_printf("xc_dom_build_image returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
@@ -306,7 +302,7 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     dom->shared_info_mfn = PHYS_PFN(start_info.shared_info);
 
     if (!xc_dom_compat_check(dom)) {
-        printk("xc_dom_compat_check failed\n");
+        grub_printf("xc_dom_compat_check failed\n");
         errnum = ERR_EXEC_FORMAT;
         goto out;
     }
@@ -323,15 +319,17 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
 
     /* Make sure the bootstrap page table does not RW-map any of our current
      * page table frames */
+    kexec_allocate(dom, dom->virt_pgtab_end);
+
     if ( (rc = xc_dom_update_guest_p2m(dom))) {
-        printk("xc_dom_update_guest_p2m returned %d\n", rc);
+        grub_printf("xc_dom_update_guest_p2m returned %d\n", rc);
         errnum = ERR_BOOT_FAILURE;
         goto out;
     }
 
     if ( dom->arch_hooks->setup_pgtables )
         if ( (rc = dom->arch_hooks->setup_pgtables(dom))) {
-            printk("setup_pgtables returned %d\n", rc);
+            grub_printf("setup_pgtables returned %d\n", rc);
             errnum = ERR_BOOT_FAILURE;
             goto out;
         }
@@ -347,8 +345,6 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
     /* Unmap libxc's projection of the boot page table */
     seg = xc_dom_seg_to_ptr(dom, &dom->pgtables_seg);
     munmap(seg, dom->pgtables_seg.vend - dom->pgtables_seg.vstart);
-    seg = xc_dom_seg_to_ptr(dom, &dom->p2m_seg);
-    munmap(seg, dom->p2m_seg.vend - dom->p2m_seg.vstart);
 
     /* Unmap day0 pages to avoid having a r/w mapping of the future page table */
     for (pfn = 0; pfn < allocated; pfn++)
@@ -362,10 +358,10 @@ void kexec(void *kernel, long kernel_size, void *module, long module_size, char 
 #ifdef __x86_64__
                 MMUEXT_PIN_L4_TABLE,
 #endif
-                xc_dom_p2m(dom, dom->pgtables_seg.pfn),
+                xc_dom_p2m_host(dom, dom->pgtables_seg.pfn),
                 dom->guest_domid)) != 0 ) {
-        printk("pin_table(%lx) returned %d\n", xc_dom_p2m(dom,
-               dom->pgtables_seg.pfn), rc);
+        grub_printf("pin_table(%lx) returned %d\n", xc_dom_p2m_host(dom,
+                    dom->pgtables_seg.pfn), rc);
         errnum = ERR_BOOT_FAILURE;
         goto out_remap;
     }

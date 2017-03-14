@@ -19,6 +19,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/mm.h>
 #include <xen/trace.h>
@@ -45,6 +46,8 @@
 /* Override macros from asm/page.h to make them work with mfn_t */
 #undef mfn_to_page
 #define mfn_to_page(_m) __mfn_to_page(mfn_x(_m))
+#undef mfn_valid
+#define mfn_valid(_mfn) __mfn_valid(mfn_x(_mfn))
 #undef page_to_mfn
 #define page_to_mfn(_pg) _mfn(__page_to_mfn(_pg))
 
@@ -65,7 +68,7 @@
 int hap_track_dirty_vram(struct domain *d,
                          unsigned long begin_pfn,
                          unsigned long nr,
-                         XEN_GUEST_HANDLE_PARAM(void) guest_dirty_bitmap)
+                         XEN_GUEST_HANDLE_64(uint8) guest_dirty_bitmap)
 {
     long rc = 0;
     struct sh_dirty_vram *dirty_vram;
@@ -331,7 +334,8 @@ hap_get_allocation(struct domain *d)
 
 /* Set the pool of pages to the required number of pages.
  * Returns 0 for success, non-zero for failure. */
-int hap_set_allocation(struct domain *d, unsigned int pages, bool *preempted)
+static unsigned int
+hap_set_allocation(struct domain *d, unsigned int pages, int *preempted)
 {
     struct page_info *pg;
 
@@ -375,9 +379,9 @@ int hap_set_allocation(struct domain *d, unsigned int pages, bool *preempted)
             break;
 
         /* Check to see if we need to yield and try again */
-        if ( preempted && general_preempt_check() )
+        if ( preempted && hypercall_preempt_check() )
         {
-            *preempted = true;
+            *preempted = 1;
             return 0;
         }
     }
@@ -426,7 +430,7 @@ static mfn_t hap_make_monitor_table(struct vcpu *v)
  oom:
     HAP_ERROR("out of memory building monitor pagetable\n");
     domain_crash(d);
-    return INVALID_MFN;
+    return _mfn(INVALID_MFN);
 }
 
 static void hap_destroy_monitor_table(struct vcpu* v, mfn_t mmfn)
@@ -442,16 +446,14 @@ static void hap_destroy_monitor_table(struct vcpu* v, mfn_t mmfn)
 /************************************************/
 void hap_domain_init(struct domain *d)
 {
-    static const struct log_dirty_ops hap_ops = {
-        .enable  = hap_enable_log_dirty,
-        .disable = hap_disable_log_dirty,
-        .clean   = hap_clean_dirty_bitmap,
-    };
-
     INIT_PAGE_LIST_HEAD(&d->arch.paging.hap.freelist);
 
+    d->arch.paging.gfn_bits = hap_paddr_bits - PAGE_SHIFT;
+
     /* Use HAP logdirty mechanism. */
-    paging_log_dirty_init(d, &hap_ops);
+    paging_log_dirty_init(d, hap_enable_log_dirty,
+                          hap_disable_log_dirty,
+                          hap_clean_dirty_bitmap);
 }
 
 /* return 0 for success, -errno for failure */
@@ -466,12 +468,14 @@ int hap_enable(struct domain *d, u32 mode)
     old_pages = d->arch.paging.hap.total_pages;
     if ( old_pages == 0 )
     {
+        unsigned int r;
         paging_lock(d);
-        rv = hap_set_allocation(d, 256, NULL);
-        if ( rv != 0 )
+        r = hap_set_allocation(d, 256, NULL);
+        if ( r != 0 )
         {
             hap_set_allocation(d, 0, NULL);
             paging_unlock(d);
+            rv = -ENOMEM;
             goto out;
         }
         paging_unlock(d);
@@ -505,7 +509,7 @@ int hap_enable(struct domain *d, u32 mode)
         }
 
         for ( i = 0; i < MAX_EPTP; i++ )
-            d->arch.altp2m_eptp[i] = mfn_x(INVALID_MFN);
+            d->arch.altp2m_eptp[i] = INVALID_MFN;
 
         for ( i = 0; i < MAX_ALTP2M; i++ )
         {
@@ -559,7 +563,7 @@ void hap_final_teardown(struct domain *d)
     paging_unlock(d);
 }
 
-void hap_teardown(struct domain *d, bool *preempted)
+void hap_teardown(struct domain *d, int *preempted)
 {
     struct vcpu *v;
     mfn_t mfn;
@@ -607,8 +611,7 @@ out:
 int hap_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
                XEN_GUEST_HANDLE_PARAM(void) u_domctl)
 {
-    int rc;
-    bool preempted = false;
+    int rc, preempted = 0;
 
     switch ( sc->op )
     {
@@ -635,6 +638,18 @@ int hap_domctl(struct domain *d, xen_domctl_shadow_op_t *sc,
     }
 }
 
+void __init hap_set_alloc_for_pvh_dom0(struct domain *d,
+                                       unsigned long hap_pages)
+{
+    int rc;
+
+    paging_lock(d);
+    rc = hap_set_allocation(d, hap_pages, NULL);
+    paging_unlock(d);
+
+    BUG_ON(rc);
+}
+
 static const struct paging_mode hap_paging_real_mode;
 static const struct paging_mode hap_paging_protected_mode;
 static const struct paging_mode hap_paging_pae_mode;
@@ -658,27 +673,32 @@ static int hap_page_fault(struct vcpu *v, unsigned long va,
 {
     struct domain *d = v->domain;
 
-    HAP_ERROR("Intercepted a guest #PF (%pv) with HAP enabled\n", v);
+    HAP_ERROR("Intercepted a guest #PF (%u:%u) with HAP enabled.\n",
+              d->domain_id, v->vcpu_id);
     domain_crash(d);
     return 0;
 }
 
 /*
  * HAP guests can handle invlpg without needing any action from Xen, so
- * should not be intercepting it.  However, we need to correctly handle
- * getting here from instruction emulation.
+ * should not be intercepting it.
  */
-static bool_t hap_invlpg(struct vcpu *v, unsigned long va)
+static int hap_invlpg(struct vcpu *v, unsigned long va)
 {
-    /*
-     * Emulate INVLPGA:
-     * Must perform the flush right now or an other vcpu may
-     * use it when we use the next VMRUN emulation, otherwise.
-     */
-    if ( nestedhvm_enabled(v->domain) && vcpu_nestedhvm(v).nv_p2m )
-        p2m_flush(v, vcpu_nestedhvm(v).nv_p2m);
+    if (nestedhvm_enabled(v->domain)) {
+        /* Emulate INVLPGA:
+         * Must perform the flush right now or an other vcpu may
+         * use it when we use the next VMRUN emulation, otherwise.
+         */
+        if ( vcpu_nestedhvm(v).nv_p2m )
+            p2m_flush(v, vcpu_nestedhvm(v).nv_p2m);
+        return 1;
+    }
 
-    return 1;
+    HAP_ERROR("Intercepted a guest INVLPG (%u:%u) with HAP enabled.\n",
+              v->domain->domain_id, v->vcpu_id);
+    domain_crash(v->domain);
+    return 0;
 }
 
 static void hap_update_cr3(struct vcpu *v, int do_locking)

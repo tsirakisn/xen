@@ -21,6 +21,7 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  *
  */
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/errno.h>
@@ -123,11 +124,10 @@ static int __init
 acpi_parse_x2apic_affinity(struct acpi_subtable_header *header,
 			   const unsigned long end)
 {
-	const struct acpi_srat_x2apic_cpu_affinity *processor_affinity
-		= container_of(header, struct acpi_srat_x2apic_cpu_affinity,
-			       header);
+	struct acpi_srat_x2apic_cpu_affinity *processor_affinity;
 
-	if (!header)
+	processor_affinity = (struct acpi_srat_x2apic_cpu_affinity *)header;
+	if (!processor_affinity)
 		return -EINVAL;
 
 	acpi_table_print_srat_entry(header);
@@ -139,13 +139,13 @@ acpi_parse_x2apic_affinity(struct acpi_subtable_header *header,
 }
 
 static int __init
-acpi_parse_processor_affinity(struct acpi_subtable_header *header,
+acpi_parse_processor_affinity(struct acpi_subtable_header * header,
 			      const unsigned long end)
 {
-	const struct acpi_srat_cpu_affinity *processor_affinity
+	struct acpi_srat_cpu_affinity *processor_affinity
 		= container_of(header, struct acpi_srat_cpu_affinity, header);
 
-	if (!header)
+	if (!processor_affinity)
 		return -EINVAL;
 
 	acpi_table_print_srat_entry(header);
@@ -157,13 +157,13 @@ acpi_parse_processor_affinity(struct acpi_subtable_header *header,
 }
 
 static int __init
-acpi_parse_memory_affinity(struct acpi_subtable_header *header,
+acpi_parse_memory_affinity(struct acpi_subtable_header * header,
 			   const unsigned long end)
 {
-	const struct acpi_srat_mem_affinity *memory_affinity
+	struct acpi_srat_mem_affinity *memory_affinity
 		= container_of(header, struct acpi_srat_mem_affinity, header);
 
-	if (!header)
+	if (!memory_affinity)
 		return -EINVAL;
 
 	acpi_table_print_srat_entry(header);

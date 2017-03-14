@@ -24,6 +24,7 @@
  * copied from Linux
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/init.h>
 #include <xen/acpi.h>
@@ -54,7 +55,8 @@ static int __init acpi_mcfg_check_entry(struct acpi_table_mcfg *mcfg,
     if (cfg->address < 0xFFFFFFFF)
         return 0;
 
-    if (!strncmp(mcfg->header.oem_id, "SGI", 3))
+    if (!strcmp(mcfg->header.oem_id, "SGI") ||
+        !strcmp(mcfg->header.oem_id, "SGI2"))
         return 0;
 
     if (mcfg->header.revision >= 1 &&

@@ -19,22 +19,16 @@
 #ifndef _XENSTORED_CORE_H
 #define _XENSTORED_CORE_H
 
-#define XC_WANT_COMPAT_MAP_FOREIGN_API
 #include <xenctrl.h>
-#include <xengnttab.h>
 
 #include <sys/types.h>
 #include <dirent.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <errno.h>
-
 #include "xenstore_lib.h"
 #include "list.h"
 #include "tdb.h"
-
-/* DEFAULT_BUFFER_SIZE should be large enough for each errno string. */
-#define DEFAULT_BUFFER_SIZE 16
 
 struct buffered_data
 {
@@ -53,7 +47,6 @@ struct buffered_data
 
 	/* The actual data. */
 	char *buffer;
-	char default_buffer[DEFAULT_BUFFER_SIZE];
 };
 
 struct connection;
@@ -113,9 +106,6 @@ struct node {
 	/* Parent (optional) */
 	struct node *parent;
 
-	/* Generation count. */
-	uint64_t generation;
-
 	/* Permissions. */
 	unsigned int num_perms;
 	struct xs_permissions *perms;
@@ -129,12 +119,12 @@ struct node {
 	char *children;
 };
 
-/* Return the only argument in the input. */
-const char *onearg(struct buffered_data *in);
-
 /* Break input into vectors, return the number, fill in up to num of them. */
 unsigned int get_strings(struct buffered_data *data,
 			 char *vec[], unsigned int num);
+
+/* Is child node a child or equal to parent node? */
+bool is_child(const char *child, const char *parent);
 
 void send_reply(struct connection *conn, enum xsd_sockmsg_type type,
 		const void *data, unsigned int len);
@@ -142,23 +132,31 @@ void send_reply(struct connection *conn, enum xsd_sockmsg_type type,
 /* Some routines (write, mkdir, etc) just need a non-error return */
 void send_ack(struct connection *conn, enum xsd_sockmsg_type type);
 
+/* Send an error: error is usually "errno". */
+void send_error(struct connection *conn, int error);
+
 /* Canonicalize this path if possible. */
-char *canonicalize(struct connection *conn, const void *ctx, const char *node);
+char *canonicalize(struct connection *conn, const char *node);
+
+/* Check if node is an event node. */
+bool check_event_node(const char *node);
 
 /* Get this node, checking we have permissions. */
 struct node *get_node(struct connection *conn,
-		      const void *ctx,
 		      const char *name,
 		      enum xs_perm_type perm);
 
 /* Get TDB context for this connection */
 TDB_CONTEXT *tdb_context(struct connection *conn);
 
+/* Destructor for tdbs: required for transaction code */
+int destroy_tdb(void *_tdb);
+
 /* Replace the tdb: required for transaction code */
 bool replace_tdb(const char *newname, TDB_CONTEXT *newtdb);
 
 struct connection *new_connection(connwritefn_t *write, connreadfn_t *read);
-void check_store(void);
+
 
 /* Is this a valid node name? */
 bool is_valid_nodename(const char *node);
@@ -166,13 +164,11 @@ bool is_valid_nodename(const char *node);
 /* Tracing infrastructure. */
 void trace_create(const void *data, const char *type);
 void trace_destroy(const void *data, const char *type);
+void trace_watch_timeout(const struct connection *conn, const char *node, const char *token);
 void trace(const char *fmt, ...);
 void dtrace_io(const struct connection *conn, const struct buffered_data *data, int out);
-void reopen_log(void);
-void close_log(void);
 
-extern char *tracefile;
-extern int tracefd;
+extern int event_fd;
 extern int dom0_domid;
 extern int dom0_event;
 extern int priv_domid;
@@ -200,7 +196,7 @@ void finish_daemonize(void);
 /* Open a pipe for signal handling */
 void init_pipe(int reopen_log_pipe[2]);
 
-xengnttab_handle **xgt_handle;
+xc_gnttab **xcg_handle;
 
 #endif /* _XENSTORED_CORE_H */
 

@@ -18,6 +18,7 @@
  */
 
 #include <asm/p2m.h>
+#include <xen/config.h>
 #include <xen/device_tree.h>
 #include <xen/domain_page.h>
 #include <xen/mm.h>
@@ -82,12 +83,12 @@ static int exynos5_init_time(void)
 static int exynos5250_specific_mapping(struct domain *d)
 {
     /* Map the chip ID */
-    map_mmio_regions(d, _gfn(paddr_to_pfn(EXYNOS5_PA_CHIPID)), 1,
-                     _mfn(paddr_to_pfn(EXYNOS5_PA_CHIPID)));
+    map_mmio_regions(d, paddr_to_pfn(EXYNOS5_PA_CHIPID), 1,
+                     paddr_to_pfn(EXYNOS5_PA_CHIPID));
 
     /* Map the PWM region */
-    map_mmio_regions(d, _gfn(paddr_to_pfn(EXYNOS5_PA_TIMER)), 2,
-                     _mfn(paddr_to_pfn(EXYNOS5_PA_TIMER)));
+    map_mmio_regions(d, paddr_to_pfn(EXYNOS5_PA_TIMER), 2,
+                     paddr_to_pfn(EXYNOS5_PA_TIMER));
 
     return 0;
 }
@@ -174,15 +175,15 @@ static int exynos5_cpu_power_up(void __iomem *power, int cpu)
         /* wait max 10 ms until cpu is on */
         while ( exynos_cpu_power_state(power, cpu) != S5P_CORE_LOCAL_PWR_EN )
         {
-            mdelay(1);
-
-            if ( --timeout == 0 )
+            if ( timeout-- == 0 )
                 break;
+
+            mdelay(1);
         }
 
         if ( timeout == 0 )
         {
-            dprintk(XENLOG_ERR, "CPU%d power enable failed\n", cpu);
+            dprintk(XENLOG_ERR, "CPU%d power enable failed", cpu);
             return -ETIMEDOUT;
         }
     }

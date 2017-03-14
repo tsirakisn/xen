@@ -21,6 +21,7 @@
  * 2 of the License, or (at your option) any later version.
  */
 
+#include <xen/config.h>
 #include <xen/cpu.h>
 #include <xen/lib.h>
 #include <xen/kernel.h>

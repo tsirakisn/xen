@@ -156,13 +156,13 @@ static void amd_iommu_setup_domain_device(
 
     spin_unlock_irqrestore(&iommu->lock, flags);
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     if ( pci_ats_device(iommu->seg, bus, pdev->devfn) &&
          !pci_ats_enabled(iommu->seg, bus, pdev->devfn) )
     {
         if ( devfn == pdev->devfn )
-            enable_ats_device(pdev, &iommu->ats_devices);
+            enable_ats_device(iommu->seg, bus, devfn, iommu);
 
         amd_iommu_flush_iotlb(devfn, pdev, INV_IOMMU_ALL_PAGES_ADDRESS, 0);
     }
@@ -272,6 +272,9 @@ static int amd_iommu_domain_init(struct domain *d)
     hd->arch.paging_mode = is_hvm_domain(d) ?
                       IOMMU_PAGING_MODE_LEVEL_2 :
                       get_paging_mode(max_page);
+
+    guest_iommu_init(d);
+
     return 0;
 }
 
@@ -282,8 +285,6 @@ static void __hwdom_init amd_iommu_hwdom_init(struct domain *d)
 
     if ( !iommu_passthrough && !need_iommu(d) )
     {
-        int rc = 0;
-
         /* Set up 1:1 page table for dom0 */
         for ( i = 0; i < max_pdx; i++ )
         {
@@ -293,22 +294,13 @@ static void __hwdom_init amd_iommu_hwdom_init(struct domain *d)
              * XXX Should we really map all non-RAM (above 4G)? Minimally
              * a pfn_valid() check would seem desirable here.
              */
-            if ( mfn_valid(_mfn(pfn)) )
-            {
-                int ret = amd_iommu_map_page(d, pfn, pfn,
-                                             IOMMUF_readable|IOMMUF_writable);
-
-                if ( !rc )
-                    rc = ret;
-            }
+            if ( mfn_valid(pfn) )
+                amd_iommu_map_page(d, pfn, pfn, 
+                                   IOMMUF_readable|IOMMUF_writable);
 
             if ( !(i & 0xfffff) )
                 process_pending_softirqs();
         }
-
-        if ( rc )
-            AMD_IOMMU_DEBUG("d%d: IOMMU mapping failed: %d\n",
-                            d->domain_id, rc);
     }
 
     for_each_amd_iommu ( iommu )
@@ -351,12 +343,12 @@ void amd_iommu_disable_domain_device(struct domain *domain,
     }
     spin_unlock_irqrestore(&iommu->lock, flags);
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     if ( devfn == pdev->devfn &&
          pci_ats_device(iommu->seg, bus, devfn) &&
          pci_ats_enabled(iommu->seg, bus, devfn) )
-        disable_ats_device(pdev);
+        disable_ats_device(iommu->seg, bus, devfn);
 }
 
 static int reassign_device(struct domain *source, struct domain *target,
@@ -482,6 +474,7 @@ static void deallocate_iommu_page_tables(struct domain *d)
 
 static void amd_iommu_domain_destroy(struct domain *d)
 {
+    guest_iommu_destroy(d);
     deallocate_iommu_page_tables(d);
     amd_iommu_flush_all_pages(d);
 }
@@ -633,6 +626,6 @@ const struct iommu_ops amd_iommu_ops = {
     .suspend = amd_iommu_suspend,
     .resume = amd_iommu_resume,
     .share_p2m = amd_iommu_share_p2m,
-    .crash_shutdown = amd_iommu_crash_shutdown,
+    .crash_shutdown = amd_iommu_suspend,
     .dump_p2m_table = amd_dump_p2m_table,
 };

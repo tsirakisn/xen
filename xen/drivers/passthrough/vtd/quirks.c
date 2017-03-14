@@ -81,6 +81,29 @@ int is_igd_vt_enabled_quirk(void)
     return ( ggc & GGC_MEMORY_VT_ENABLED ? 1 : 0 );
 }
 
+/**
+ * Determine if this devices has a known-problematic Integrated Graphics
+ * Device (IGD). At least one older IGD device doesn't work with our VT-d
+ * implementation.
+ */
+int is_oxt_nehalem_igd_quirk(void)
+{
+    u16 vid, pid;
+
+    //Check the vendor ID of the IGD device.
+    //(Note that device is on bus zero, and this an integrated component of
+    //the CPU for platforms supporting VTD. As a result, this makes it
+    //reasonable to trust its vendor ID.)
+    vid = pci_conf_read16(0, 0, IGD_DEV, 0, 0);
+    if(vid != 0x8086)
+      return 0;
+
+    //And check the product ID of the device.
+    pid = pci_conf_read16(0, 0, IGD_DEV, 0, 2);
+    return (pid == 0x0042);
+}
+
+
 /*
  * QUIRK to workaround cantiga VT-d buffer flush issue.
  * The workaround is to force write buffer flush even if
@@ -331,12 +354,10 @@ void __init platform_quirks_init(void)
  * assigning Intel integrated wifi device to a guest.
  */
 
-static int __must_check map_me_phantom_function(struct domain *domain,
-                                                u32 dev, int map)
+static void map_me_phantom_function(struct domain *domain, u32 dev, int map)
 {
     struct acpi_drhd_unit *drhd;
     struct pci_dev *pdev;
-    int rc;
 
     /* find ME VT-d engine base on a real ME device */
     pdev = pci_get_pdev(0, 0, PCI_DEVFN(dev, 0));
@@ -344,26 +365,23 @@ static int __must_check map_me_phantom_function(struct domain *domain,
 
     /* map or unmap ME phantom function */
     if ( map )
-        rc = domain_context_mapping_one(domain, drhd->iommu, 0,
-                                        PCI_DEVFN(dev, 7), NULL);
+        domain_context_mapping_one(domain, drhd->iommu, 0,
+                                   PCI_DEVFN(dev, 7), NULL);
     else
-        rc = domain_context_unmap_one(domain, drhd->iommu, 0,
-                                      PCI_DEVFN(dev, 7));
-
-    return rc;
+        domain_context_unmap_one(domain, drhd->iommu, 0,
+                                 PCI_DEVFN(dev, 7));
 }
 
-int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
+void me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
 {
     u32 id;
-    int rc = 0;
 
     id = pci_conf_read32(0, 0, 0, 0, 0);
     if ( IS_CTG(id) )
     {
         /* quit if ME does not exist */
         if ( pci_conf_read32(0, 0, 3, 0, 0) == 0xffffffff )
-            return 0;
+            return;
 
         /* if device is WLAN device, map ME phantom device 0:3.7 */
         id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
@@ -377,7 +395,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x423b8086:
             case 0x423c8086:
             case 0x423d8086:
-                rc = map_me_phantom_function(domain, 3, map);
+                map_me_phantom_function(domain, 3, map);
                 break;
             default:
                 break;
@@ -387,7 +405,7 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
     {
         /* quit if ME does not exist */
         if ( pci_conf_read32(0, 0, 22, 0, 0) == 0xffffffff )
-            return 0;
+            return;
 
         /* if device is WLAN device, map ME phantom device 0:22.7 */
         id = pci_conf_read32(0, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), 0);
@@ -403,14 +421,12 @@ int me_wifi_quirk(struct domain *domain, u8 bus, u8 devfn, int map)
             case 0x42388086:        /* Puma Peak */
             case 0x422b8086:
             case 0x422c8086:
-                rc = map_me_phantom_function(domain, 22, map);
+                map_me_phantom_function(domain, 22, map);
                 break;
             default:
                 break;
         }
     }
-
-    return rc;
 }
 
 void pci_vtd_quirk(const struct pci_dev *pdev)

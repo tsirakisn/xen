@@ -1,16 +1,14 @@
 CFLAGS += -fshort-wchar
 
-efi := y$(shell rm -f disabled)
+obj-y += stub.o
+
+create = test -e $(1) || touch -t 199901010000 $(1)
+
+efi := $(filter y,$(x86_64)$(shell rm -f disabled))
 efi := $(if $(efi),$(shell $(CC) $(filter-out $(CFLAGS-y) .%.d,$(CFLAGS)) -c check.c 2>disabled && echo y))
 efi := $(if $(efi),$(shell $(LD) -mi386pep --subsystem=10 -o check.efi check.o 2>disabled && echo y))
-efi := $(if $(efi),$(shell rm disabled)y)
+efi := $(if $(efi),$(shell rm disabled)y,$(shell $(call create,boot.init.o); $(call create,runtime.o)))
 
-%.o: %.ihex
-	$(OBJCOPY) -I ihex -O binary $< $@
+extra-$(efi) += boot.init.o relocs-dummy.o runtime.o compat.o
 
-boot.init.o: buildid.o
-
-obj-y := stub.o
-obj-$(efi) := boot.init.o compat.o relocs-dummy.o runtime.o
-extra-$(efi) += buildid.o
-nogcov-$(efi) += stub.o
+stub.o: $(extra-y)

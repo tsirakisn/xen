@@ -6,7 +6,8 @@
  */
 
 #include <asm/alternative.h>
-#include <asm/cpufeatureset.h>
+#define X86_FEATURES_ONLY
+#include <asm/cpufeature.h>
 
 /*
  * We specify the memory operand as both input and output because the memory
@@ -144,11 +145,8 @@ static inline int test_and_set_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btsl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile ( "lock; btsl %2,%1\n\tsbbl %0,%0"
+                   : "=r" (oldbit), "+m" (ADDR) : "Ir" (nr) : "memory");
     return oldbit;
 }
 #define test_and_set_bit(nr, addr) ({                   \
@@ -169,11 +167,10 @@ static inline int __test_and_set_bit(int nr, void *addr)
 {
     int oldbit;
 
-    asm volatile ( "btsl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (*(int *)addr) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile (
+        "btsl %2,%1\n\tsbbl %0,%0"
+        : "=r" (oldbit), "+m" (*(int *)addr)
+        : "Ir" (nr) : "memory" );
     return oldbit;
 }
 #define __test_and_set_bit(nr, addr) ({                 \
@@ -193,11 +190,8 @@ static inline int test_and_clear_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btrl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile ( "lock; btrl %2,%1\n\tsbbl %0,%0"
+                   : "=r" (oldbit), "+m" (ADDR) : "Ir" (nr) : "memory");
     return oldbit;
 }
 #define test_and_clear_bit(nr, addr) ({                 \
@@ -218,11 +212,10 @@ static inline int __test_and_clear_bit(int nr, void *addr)
 {
     int oldbit;
 
-    asm volatile ( "btrl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (*(int *)addr) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile (
+        "btrl %2,%1\n\tsbbl %0,%0"
+        : "=r" (oldbit), "+m" (*(int *)addr)
+        : "Ir" (nr) : "memory" );
     return oldbit;
 }
 #define __test_and_clear_bit(nr, addr) ({               \
@@ -235,11 +228,10 @@ static inline int __test_and_change_bit(int nr, void *addr)
 {
     int oldbit;
 
-    asm volatile ( "btcl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (*(int *)addr) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile (
+        "btcl %2,%1\n\tsbbl %0,%0"
+        : "=r" (oldbit), "+m" (*(int *)addr)
+        : "Ir" (nr) : "memory" );
     return oldbit;
 }
 #define __test_and_change_bit(nr, addr) ({              \
@@ -259,11 +251,8 @@ static inline int test_and_change_bit(int nr, volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "lock; btcl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit),
-                     [addr] "+m" (ADDR) : [nr] "Ir" (nr) : "memory" );
-
+    asm volatile ( "lock; btcl %2,%1\n\tsbbl %0,%0"
+                   : "=r" (oldbit), "+m" (ADDR) : "Ir" (nr) : "memory");
     return oldbit;
 }
 #define test_and_change_bit(nr, addr) ({                \
@@ -281,11 +270,10 @@ static inline int variable_test_bit(int nr, const volatile void *addr)
 {
     int oldbit;
 
-    asm volatile ( "btl %[nr], %[addr]\n\t"
-                   ASM_FLAG_OUT(, "sbbl %[old], %[old]\n\t")
-                   : [old] ASM_FLAG_OUT("=@ccc", "=r") (oldbit)
-                   : [addr] "m" (CONST_ADDR), [nr] "Ir" (nr) : "memory" );
-
+    asm volatile (
+        "btl %2,%1\n\tsbbl %0,%0"
+        : "=r" (oldbit)
+        : "m" (CONST_ADDR), "Ir" (nr) : "memory" );
     return oldbit;
 }
 
@@ -305,7 +293,7 @@ extern unsigned int __find_first_zero_bit(
 extern unsigned int __find_next_zero_bit(
     const unsigned long *addr, unsigned int size, unsigned int offset);
 
-static always_inline unsigned int __scanbit(unsigned long val, unsigned int max)
+static inline unsigned int __scanbit(unsigned long val, unsigned int max)
 {
     if ( __builtin_constant_p(max) && max == BITS_PER_LONG )
         alternative_io("bsf %[in],%[out]; cmovz %[max],%k[out]",

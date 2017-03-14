@@ -32,7 +32,6 @@
 #include <xen/tasklet.h>
 #include <xsm/xsm.h>
 #include <asm/msi.h>
-#include "ats.h"
 
 struct pci_seg {
     struct list_head alldevs_list;
@@ -48,28 +47,7 @@ struct pci_seg {
     } bus2bridge[MAX_BUSES];
 };
 
-static spinlock_t _pcidevs_lock = SPIN_LOCK_UNLOCKED;
-
-void pcidevs_lock(void)
-{
-    spin_lock_recursive(&_pcidevs_lock);
-}
-
-void pcidevs_unlock(void)
-{
-    spin_unlock_recursive(&_pcidevs_lock);
-}
-
-bool_t pcidevs_locked(void)
-{
-    return !!spin_is_locked(&_pcidevs_lock);
-}
-
-bool_t pcidevs_trylock(void)
-{
-    return !!spin_trylock_recursive(&_pcidevs_lock);
-}
-
+spinlock_t pcidevs_lock = SPIN_LOCK_UNLOCKED;
 static struct radix_tree_root pci_segments;
 
 static inline struct pci_seg *get_pseg(u16 seg)
@@ -379,8 +357,8 @@ static struct pci_dev *alloc_pdev(struct pci_seg *pseg, u8 bus, u8 devfn)
             break;
 
         default:
-            printk(XENLOG_WARNING "%04x:%02x:%02x.%u: unknown type %d\n",
-                   pseg->nr, bus, PCI_SLOT(devfn), PCI_FUNC(devfn), pdev->type);
+            printk(XENLOG_WARNING "%s: unknown type: %04x:%02x:%02x.%u\n",
+                   __func__, pseg->nr, bus, PCI_SLOT(devfn), PCI_FUNC(devfn));
             break;
     }
 
@@ -433,14 +411,14 @@ int __init pci_hide_device(int bus, int devfn)
     struct pci_dev *pdev;
     int rc = -ENOMEM;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = alloc_pdev(get_pseg(0), bus, devfn);
     if ( pdev )
     {
         _pci_hide_device(pdev);
         rc = 0;
     }
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return rc;
 }
@@ -477,7 +455,7 @@ struct pci_dev *pci_get_pdev(int seg, int bus, int devfn)
     struct pci_seg *pseg = get_pseg(seg);
     struct pci_dev *pdev = NULL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     ASSERT(seg != -1 || bus == -1);
     ASSERT(bus != -1 || devfn == -1);
 
@@ -602,9 +580,9 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
         pdev_type = "extended function";
     else if (info->is_virtfn)
     {
-        pcidevs_lock();
+        spin_lock(&pcidevs_lock);
         pdev = pci_get_pdev(seg, info->physfn.bus, info->physfn.devfn);
-        pcidevs_unlock();
+        spin_unlock(&pcidevs_lock);
         if ( !pdev )
             pci_add_device(seg, info->physfn.bus, info->physfn.devfn,
                            NULL, node);
@@ -622,7 +600,7 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
 
     ret = -ENOMEM;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pseg = alloc_pseg(seg);
     if ( !pseg )
         goto out;
@@ -724,7 +702,7 @@ int pci_add_device(u16 seg, u8 bus, u8 devfn,
     pci_enable_acs(pdev);
 
 out:
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
     if ( !ret )
     {
         printk(XENLOG_DEBUG "PCI add %s %04x:%02x:%02x.%u\n", pdev_type,
@@ -756,7 +734,7 @@ int pci_remove_device(u16 seg, u8 bus, u8 devfn)
     if ( !pseg )
         return -ENODEV;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     list_for_each_entry ( pdev, &pseg->alldevs_list, alldevs_list )
         if ( pdev->bus == bus && pdev->devfn == devfn )
         {
@@ -770,7 +748,7 @@ int pci_remove_device(u16 seg, u8 bus, u8 devfn)
             break;
         }
 
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
     return ret;
 }
 
@@ -828,11 +806,11 @@ int pci_release_devices(struct domain *d)
     u8 bus, devfn;
     int ret;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     ret = pci_clean_dpci_irqs(d);
     if ( ret )
     {
-        pcidevs_unlock();
+        spin_unlock(&pcidevs_lock);
         return ret;
     }
     while ( (pdev = pci_get_pdev_by_domain(d, -1, -1, -1)) )
@@ -844,7 +822,7 @@ int pci_release_devices(struct domain *d)
                    d->domain_id, pdev->seg, bus,
                    PCI_SLOT(devfn), PCI_FUNC(devfn));
     }
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return 0;
 }
@@ -941,7 +919,7 @@ void pci_check_disable_device(u16 seg, u8 bus, u8 devfn)
     s_time_t now = NOW();
     u16 cword;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = pci_get_real_pdev(seg, bus, devfn);
     if ( pdev )
     {
@@ -952,7 +930,7 @@ void pci_check_disable_device(u16 seg, u8 bus, u8 devfn)
         if ( ++pdev->fault.count < PT_FAULT_THRESHOLD )
             pdev = NULL;
     }
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     if ( !pdev )
         return;
@@ -991,8 +969,7 @@ static int __init _scan_pci_devices(struct pci_seg *pseg, void *arg)
                 pdev = alloc_pdev(pseg, bus, PCI_DEVFN(dev, func));
                 if ( !pdev )
                 {
-                    printk(XENLOG_WARNING "%04x:%02x:%02x.%u: alloc_pdev failed\n",
-                           pseg->nr, bus, dev, func);
+                    printk("%s: alloc_pdev failed.\n", __func__);
                     return -ENOMEM;
                 }
 
@@ -1010,9 +987,9 @@ int __init scan_pci_devices(void)
 {
     int ret;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     ret = pci_segments_iterate(_scan_pci_devices, NULL);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return ret;
 }
@@ -1076,17 +1053,17 @@ static int __hwdom_init _setup_hwdom_pci_devices(struct pci_seg *pseg, void *arg
 
             if ( iommu_verbose )
             {
-                pcidevs_unlock();
+                spin_unlock(&pcidevs_lock);
                 process_pending_softirqs();
-                pcidevs_lock();
+                spin_lock(&pcidevs_lock);
             }
         }
 
         if ( !iommu_verbose )
         {
-            pcidevs_unlock();
+            spin_unlock(&pcidevs_lock);
             process_pending_softirqs();
-            pcidevs_lock();
+            spin_lock(&pcidevs_lock);
         }
     }
 
@@ -1098,9 +1075,9 @@ void __hwdom_init setup_hwdom_pci_devices(
 {
     struct setup_hwdom ctxt = { .d = d, .handler = handler };
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pci_segments_iterate(_setup_hwdom_pci_devices, &ctxt);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 }
 
 #ifdef CONFIG_ACPI
@@ -1228,14 +1205,20 @@ static int _dump_pci_devices(struct pci_seg *pseg, void *arg)
 static void dump_pci_devices(unsigned char ch)
 {
     printk("==== PCI devices ====\n");
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pci_segments_iterate(_dump_pci_devices, NULL);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 }
+
+struct keyhandler dump_pci_devices_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_pci_devices,
+    .desc = "dump PCI devices"
+};
 
 static int __init setup_dump_pcidevs(void)
 {
-    register_keyhandler('Q', dump_pci_devices, "dump PCI devices", 1);
+    register_keyhandler('Q', &dump_pci_devices_keyhandler);
     return 0;
 }
 __initcall(setup_dump_pcidevs);
@@ -1243,15 +1226,16 @@ __initcall(setup_dump_pcidevs);
 int iommu_update_ire_from_msi(
     struct msi_desc *msi_desc, struct msi_msg *msg)
 {
-    return iommu_intremap
-           ? iommu_get_ops()->update_ire_from_msi(msi_desc, msg) : 0;
+    const struct iommu_ops *ops = iommu_get_ops();
+    return iommu_intremap ? ops->update_ire_from_msi(msi_desc, msg) : 0;
 }
 
 void iommu_read_msi_from_ire(
     struct msi_desc *msi_desc, struct msi_msg *msg)
 {
+    const struct iommu_ops *ops = iommu_get_ops();
     if ( iommu_intremap )
-        iommu_get_ops()->read_msi_from_ire(msi_desc, msg);
+        ops->read_msi_from_ire(msi_desc, msg);
 }
 
 int iommu_add_device(struct pci_dev *pdev)
@@ -1263,7 +1247,7 @@ int iommu_add_device(struct pci_dev *pdev)
     if ( !pdev->domain )
         return -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     hd = dom_iommu(pdev->domain);
     if ( !iommu_enabled || !hd->platform_ops )
@@ -1292,7 +1276,7 @@ int iommu_enable_device(struct pci_dev *pdev)
     if ( !pdev->domain )
         return -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     hd = dom_iommu(pdev->domain);
     if ( !iommu_enabled || !hd->platform_ops ||
@@ -1341,9 +1325,9 @@ static int device_assigned(u16 seg, u8 bus, u8 devfn)
 {
     struct pci_dev *pdev;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = pci_get_pdev_by_domain(hardware_domain, seg, bus, devfn);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return pdev ? 0 : -EBUSY;
 }
@@ -1365,13 +1349,13 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
              p2m_get_hostp2m(d)->global_logdirty)) )
         return -EXDEV;
 
-    if ( !pcidevs_trylock() )
+    if ( !spin_trylock(&pcidevs_lock) )
         return -ERESTART;
 
     rc = iommu_construct(d);
     if ( rc )
     {
-        pcidevs_unlock();
+        spin_unlock(&pcidevs_lock);
         return rc;
     }
 
@@ -1381,9 +1365,6 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
         rc = pci_get_pdev(seg, bus, devfn) ? -EBUSY : -ENODEV;
         goto done;
     }
-
-    if ( pdev->msix )
-        msixtbl_init(d);
 
     pdev->fault.count = 0;
 
@@ -1405,7 +1386,7 @@ static int assign_device(struct domain *d, u16 seg, u8 bus, u8 devfn, u32 flag)
  done:
     if ( !has_arch_pdevs(d) && need_iommu(d) )
         iommu_teardown(d);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return rc;
 }
@@ -1420,7 +1401,7 @@ int deassign_device(struct domain *d, u16 seg, u8 bus, u8 devfn)
     if ( !iommu_enabled || !hd->platform_ops )
         return -EINVAL;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     pdev = pci_get_pdev_by_domain(d, seg, bus, devfn);
     if ( !pdev )
         return -ENODEV;
@@ -1475,7 +1456,7 @@ static int iommu_get_device_group(
 
     group_id = ops->get_device_group_id(seg, bus, devfn);
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     for_each_pdev( d, pdev )
     {
         if ( (pdev->seg != seg) ||
@@ -1494,44 +1475,16 @@ static int iommu_get_device_group(
 
             if ( unlikely(copy_to_guest_offset(buf, i, &bdf, 1)) )
             {
-                pcidevs_unlock();
+                spin_unlock(&pcidevs_lock);
                 return -1;
             }
             i++;
         }
     }
 
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return i;
-}
-
-void iommu_dev_iotlb_flush_timeout(struct domain *d, struct pci_dev *pdev)
-{
-    pcidevs_lock();
-
-    disable_ats_device(pdev);
-
-    ASSERT(pdev->domain);
-    if ( d != pdev->domain )
-    {
-        pcidevs_unlock();
-        return;
-    }
-
-    list_del(&pdev->domain_list);
-    pdev->domain = NULL;
-    _pci_hide_device(pdev);
-
-    if ( !d->is_shutting_down && printk_ratelimit() )
-        printk(XENLOG_ERR
-               "dom%d: ATS device %04x:%02x:%02x.%u flush failed\n",
-               d->domain_id, pdev->seg, pdev->bus, PCI_SLOT(pdev->devfn),
-               PCI_FUNC(pdev->devfn));
-    if ( !is_hardware_domain(d) )
-        domain_crash(d);
-
-    pcidevs_unlock();
 }
 
 int iommu_do_pci_domctl(
@@ -1603,13 +1556,6 @@ int iommu_do_pci_domctl(
         break;
 
     case XEN_DOMCTL_assign_device:
-        /* Don't support self-assignment of devices. */
-        if ( d == current->domain )
-        {
-            ret = -EINVAL;
-            break;
-        }
-
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
             break;
@@ -1650,13 +1596,6 @@ int iommu_do_pci_domctl(
         break;
 
     case XEN_DOMCTL_deassign_device:
-        /* Don't support self-deassignment of devices. */
-        if ( d == current->domain )
-        {
-            ret = -EINVAL;
-            break;
-        }
-
         ret = -ENODEV;
         if ( domctl->u.assign_device.dev != XEN_DOMCTL_DEV_PCI )
             break;
@@ -1671,9 +1610,9 @@ int iommu_do_pci_domctl(
         bus = PCI_BUS(machine_sbdf);
         devfn = PCI_DEVFN2(machine_sbdf);
 
-        pcidevs_lock();
+        spin_lock(&pcidevs_lock);
         ret = deassign_device(d, seg, bus, devfn);
-        pcidevs_unlock();
+        spin_unlock(&pcidevs_lock);
         if ( ret )
             printk(XENLOG_G_ERR
                    "deassign %04x:%02x:%02x.%u from dom%d failed (%d)\n",

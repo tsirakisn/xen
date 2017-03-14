@@ -21,6 +21,7 @@
 #
 *****************************************************************************/
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/sched.h>

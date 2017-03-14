@@ -37,6 +37,7 @@
 int xc_flask_op(xc_interface *xch, xen_flask_op_t *op)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BOUNCE(op, sizeof(*op), XC_HYPERCALL_BUFFER_BOUNCE_BOTH);
 
     op->interface_version = XEN_FLASK_INTERFACE_VERSION;
@@ -47,9 +48,10 @@ int xc_flask_op(xc_interface *xch, xen_flask_op_t *op)
         goto out;
     }
 
-    ret = xencall1(xch->xcall, __HYPERVISOR_xsm_op,
-                   HYPERCALL_BUFFER_AS_ARG(op));
-    if ( ret < 0 )
+    hypercall.op     = __HYPERVISOR_xsm_op;
+    hypercall.arg[0] = HYPERCALL_BUFFER_AS_ARG(op);
+
+    if ( (ret = do_xen_hypercall(xch, &hypercall)) < 0 )
     {
         if ( errno == EACCES )
             fprintf(stderr, "XSM operation failed!\n");

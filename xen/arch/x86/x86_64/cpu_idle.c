@@ -21,6 +21,9 @@
  * ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
  */
 
+#define __XEN_TOOLS__ /* for using get_xen_guest_handle macro */
+
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/xmalloc.h>
 #include <xen/guest_access.h>

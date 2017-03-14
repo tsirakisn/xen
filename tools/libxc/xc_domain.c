@@ -26,30 +26,15 @@
 #include <xen/memory.h>
 #include <xen/hvm/hvm_op.h>
 
-int xc_domain_create(xc_interface *xch, uint32_t ssidref,
-                     xen_domain_handle_t handle, uint32_t flags,
-                     uint32_t *pdomid, xc_domain_configuration_t *config)
+int xc_domain_create_config(xc_interface *xch,
+                            uint32_t ssidref,
+                            xen_domain_handle_t handle,
+                            uint32_t flags,
+                            uint32_t *pdomid,
+                            xc_domain_configuration_t *config)
 {
-    xc_domain_configuration_t lconfig;
     int err;
     DECLARE_DOMCTL;
-
-    if ( config == NULL )
-    {
-        memset(&lconfig, 0, sizeof(lconfig));
-
-#if defined (__i386) || defined(__x86_64__)
-        if ( flags & XEN_DOMCTL_CDF_hvm_guest )
-            lconfig.emulation_flags = XEN_X86_EMU_ALL;
-#elif defined (__arm__) || defined(__aarch64__)
-        lconfig.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
-        lconfig.nr_spis = 0;
-#else
-#error Architecture not supported
-#endif
-
-        config = &lconfig;
-    }
 
     domctl.cmd = XEN_DOMCTL_createdomain;
     domctl.domain = (domid_t)*pdomid;
@@ -67,6 +52,30 @@ int xc_domain_create(xc_interface *xch, uint32_t ssidref,
     return 0;
 }
 
+int xc_domain_create(xc_interface *xch,
+                     uint32_t ssidref,
+                     xen_domain_handle_t handle,
+                     uint32_t flags,
+                     uint32_t *pdomid)
+{
+    xc_domain_configuration_t config;
+
+    memset(&config, 0, sizeof(config));
+
+#if defined (__i386) || defined(__x86_64__)
+    /* No arch-specific configuration for now */
+#elif defined (__arm__) || defined(__aarch64__)
+    config.gic_version = XEN_DOMCTL_CONFIG_GIC_NATIVE;
+    config.nr_spis = 0;
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+
+    return xc_domain_create_config(xch, ssidref, handle,
+                                   flags, pdomid, &config);
+}
+
 int xc_domain_cacheflush(xc_interface *xch, uint32_t domid,
                          xen_pfn_t start_pfn, xen_pfn_t nr_pfns)
 {
@@ -74,10 +83,10 @@ int xc_domain_cacheflush(xc_interface *xch, uint32_t domid,
     /*
      * The x86 architecture provides cache coherency guarantees which prevent
      * the need for this hypercall.  Avoid the overhead of making a hypercall
-     * just for Xen to return -ENOSYS.  It is safe to ignore this call on x86
-     * so we just return 0.
+     * just for Xen to return -ENOSYS.
      */
-    return 0;
+    errno = ENOSYS;
+    return -1;
 #else
     DECLARE_DOMCTL;
     domctl.cmd = XEN_DOMCTL_cacheflush;
@@ -122,6 +131,7 @@ int xc_domain_shutdown(xc_interface *xch,
                        int reason)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BUFFER(sched_remote_shutdown_t, arg);
 
     arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
@@ -131,11 +141,13 @@ int xc_domain_shutdown(xc_interface *xch,
         goto out1;
     }
 
+    hypercall.op     = __HYPERVISOR_sched_op;
+    hypercall.arg[0] = (unsigned long)SCHEDOP_remote_shutdown;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
     arg->domain_id = domid;
     arg->reason = reason;
-    ret = xencall2(xch->xcall, __HYPERVISOR_sched_op,
-                   SCHEDOP_remote_shutdown,
-                   HYPERCALL_BUFFER_AS_ARG(arg));
+
+    ret = do_xen_hypercall(xch, &hypercall);
 
     xc_hypercall_buffer_free(xch, arg);
 
@@ -371,8 +383,6 @@ int xc_domain_getinfo(xc_interface *xch,
         info->hvm      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_hvm_guest);
         info->debugged = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_debugged);
         info->pvh      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_pvh_guest);
-        info->xenstore = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_xs_domain);
-        info->hap      = !!(domctl.u.getdomaininfo.flags&XEN_DOMINF_hap);
 
         info->shutdown_reason =
             (domctl.u.getdomaininfo.flags>>XEN_DOMINF_shutdownshift) &
@@ -560,6 +570,7 @@ int xc_watchdog(xc_interface *xch,
                 uint32_t timeout)
 {
     int ret = -1;
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BUFFER(sched_watchdog_t, arg);
 
     arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
@@ -569,12 +580,13 @@ int xc_watchdog(xc_interface *xch,
         goto out1;
     }
 
+    hypercall.op     = __HYPERVISOR_sched_op;
+    hypercall.arg[0] = (unsigned long)SCHEDOP_watchdog;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
     arg->id = id;
     arg->timeout = timeout;
 
-    ret = xencall2(xch->xcall, __HYPERVISOR_sched_op,
-                   SCHEDOP_watchdog,
-                   HYPERCALL_BUFFER_AS_ARG(arg));
+    ret = do_xen_hypercall(xch, &hypercall);
 
     xc_hypercall_buffer_free(xch, arg);
 
@@ -764,6 +776,17 @@ int xc_domain_set_time_offset(xc_interface *xch,
     return do_domctl(xch, &domctl);
 }
 
+int xc_domain_set_cores_per_socket(xc_interface *xch,
+                                   uint32_t domid,
+                                   uint32_t cores_per_socket)
+{
+    DECLARE_DOMCTL;
+    domctl.cmd = XEN_DOMCTL_setcorespersocket;
+    domctl.domain = (domid_t)domid;
+    domctl.u.setcorespersocket.cores_per_socket = cores_per_socket;
+    return do_domctl(xch, &domctl);
+}
+
 int xc_domain_disable_migrate(xc_interface *xch, uint32_t domid)
 {
     DECLARE_DOMCTL;
@@ -816,7 +839,7 @@ int xc_domain_get_tsc_info(xc_interface *xch,
 
 int xc_domain_maximum_gpfn(xc_interface *xch, domid_t domid, xen_pfn_t *gpfns)
 {
-    long rc = do_memory_op(xch, XENMEM_maximum_gpfn, &domid, sizeof(domid));
+    int rc = do_memory_op(xch, XENMEM_maximum_gpfn, &domid, sizeof(domid));
 
     if ( rc >= 0 )
     {
@@ -1353,6 +1376,7 @@ static inline int xc_hvm_param_deprecated_check(uint32_t param)
 
 int xc_hvm_param_set(xc_interface *handle, domid_t dom, uint32_t param, uint64_t value)
 {
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BUFFER(xen_hvm_param_t, arg);
     int rc = xc_hvm_param_deprecated_check(param);
 
@@ -1363,18 +1387,20 @@ int xc_hvm_param_set(xc_interface *handle, domid_t dom, uint32_t param, uint64_t
     if ( arg == NULL )
         return -1;
 
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_set_param;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
     arg->domid = dom;
     arg->index = param;
     arg->value = value;
-    rc = xencall2(handle->xcall, __HYPERVISOR_hvm_op,
-                  HVMOP_set_param,
-                  HYPERCALL_BUFFER_AS_ARG(arg));
+    rc = do_xen_hypercall(handle, &hypercall);
     xc_hypercall_buffer_free(handle, arg);
     return rc;
 }
 
 int xc_hvm_param_get(xc_interface *handle, domid_t dom, uint32_t param, uint64_t *value)
 {
+    DECLARE_HYPERCALL;
     DECLARE_HYPERCALL_BUFFER(xen_hvm_param_t, arg);
     int rc = xc_hvm_param_deprecated_check(param);
 
@@ -1385,11 +1411,12 @@ int xc_hvm_param_get(xc_interface *handle, domid_t dom, uint32_t param, uint64_t
     if ( arg == NULL )
         return -1;
 
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_get_param;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
     arg->domid = dom;
     arg->index = param;
-    rc = xencall2(handle->xcall, __HYPERVISOR_hvm_op,
-                  HVMOP_get_param,
-                  HYPERCALL_BUFFER_AS_ARG(arg));
+    rc = do_xen_hypercall(handle, &hypercall);
     *value = arg->value;
     xc_hypercall_buffer_free(handle, arg);
     return rc;
@@ -1410,6 +1437,259 @@ int xc_get_hvm_param(xc_interface *handle, domid_t dom, int param, unsigned long
         return ret;
     *value = v;
     return 0;
+}
+
+int xc_hvm_create_ioreq_server(xc_interface *xch,
+                               domid_t domid,
+                               int handle_bufioreq,
+                               ioservid_t *id)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_create_ioreq_server_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_create_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->handle_bufioreq = handle_bufioreq;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    *id = arg->id;
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_get_ioreq_server_info(xc_interface *xch,
+                                 domid_t domid,
+                                 ioservid_t id,
+                                 xen_pfn_t *ioreq_pfn,
+                                 xen_pfn_t *bufioreq_pfn,
+                                 evtchn_port_t *bufioreq_port)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_get_ioreq_server_info_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_get_ioreq_server_info;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+    if ( rc != 0 )
+        goto done;
+
+    if ( ioreq_pfn )
+        *ioreq_pfn = arg->ioreq_pfn;
+
+    if ( bufioreq_pfn )
+        *bufioreq_pfn = arg->bufioreq_pfn;
+
+    if ( bufioreq_port )
+        *bufioreq_port = arg->bufioreq_port;
+
+done:
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_map_io_range_to_ioreq_server(xc_interface *xch, domid_t domid,
+                                        ioservid_t id, int is_mmio,
+                                        uint64_t start, uint64_t end)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_io_range_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_map_io_range_to_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+    arg->type = is_mmio ? HVMOP_IO_RANGE_MEMORY : HVMOP_IO_RANGE_PORT;
+    arg->start = start;
+    arg->end = end;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_unmap_io_range_from_ioreq_server(xc_interface *xch, domid_t domid,
+                                            ioservid_t id, int is_mmio,
+                                            uint64_t start, uint64_t end)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_io_range_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_unmap_io_range_from_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+    arg->type = is_mmio ? HVMOP_IO_RANGE_MEMORY : HVMOP_IO_RANGE_PORT;
+    arg->start = start;
+    arg->end = end;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_map_pcidev_to_ioreq_server(xc_interface *xch, domid_t domid,
+                                      ioservid_t id, uint16_t segment,
+                                      uint8_t bus, uint8_t device,
+                                      uint8_t function)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_io_range_t, arg);
+    int rc;
+
+    if (device > 0x1f || function > 0x7) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_map_io_range_to_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+    arg->type = HVMOP_IO_RANGE_PCI;
+
+    /*
+     * The underlying hypercall will deal with ranges of PCI SBDF
+     * but, for simplicity, the API only uses singletons.
+     */
+    arg->start = arg->end = HVMOP_PCI_SBDF((uint64_t)segment,
+                                           (uint64_t)bus,
+                                           (uint64_t)device,
+                                           (uint64_t)function);
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_unmap_pcidev_from_ioreq_server(xc_interface *xch, domid_t domid,
+                                          ioservid_t id, uint16_t segment,
+                                          uint8_t bus, uint8_t device,
+                                          uint8_t function)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_io_range_t, arg);
+    int rc;
+
+    if (device > 0x1f || function > 0x7) {
+        errno = EINVAL;
+        return -1;
+    }
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_unmap_io_range_from_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+    arg->type = HVMOP_IO_RANGE_PCI;
+    arg->start = arg->end = HVMOP_PCI_SBDF((uint64_t)segment,
+                                           (uint64_t)bus,
+                                           (uint64_t)device,
+                                           (uint64_t)function);
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_destroy_ioreq_server(xc_interface *xch,
+                                domid_t domid,
+                                ioservid_t id)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_destroy_ioreq_server_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_destroy_ioreq_server;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
+}
+
+int xc_hvm_set_ioreq_server_state(xc_interface *xch,
+                                  domid_t domid,
+                                  ioservid_t id,
+                                  int enabled)
+{
+    DECLARE_HYPERCALL;
+    DECLARE_HYPERCALL_BUFFER(xen_hvm_set_ioreq_server_state_t, arg);
+    int rc;
+
+    arg = xc_hypercall_buffer_alloc(xch, arg, sizeof(*arg));
+    if ( arg == NULL )
+        return -1;
+
+    hypercall.op     = __HYPERVISOR_hvm_op;
+    hypercall.arg[0] = HVMOP_set_ioreq_server_state;
+    hypercall.arg[1] = HYPERCALL_BUFFER_AS_ARG(arg);
+
+    arg->domid = domid;
+    arg->id = id;
+    arg->enabled = !!enabled;
+
+    rc = do_xen_hypercall(xch, &hypercall);
+
+    xc_hypercall_buffer_free(xch, arg);
+    return rc;
 }
 
 int xc_domain_setdebugging(xc_interface *xch,
@@ -1946,7 +2226,7 @@ int xc_domain_memory_mapping(
 {
     DECLARE_DOMCTL;
     xc_dominfo_t info;
-    int ret = 0, rc;
+    int ret = 0, err;
     unsigned long done = 0, nr, max_batch_sz;
 
     if ( xc_domain_getinfo(xch, domid, 1, &info) != 1 ||
@@ -1971,24 +2251,19 @@ int xc_domain_memory_mapping(
         domctl.u.memory_mapping.nr_mfns = nr;
         domctl.u.memory_mapping.first_gfn = first_gfn + done;
         domctl.u.memory_mapping.first_mfn = first_mfn + done;
-        rc = do_domctl(xch, &domctl);
-        if ( rc < 0 && errno == E2BIG )
+        err = do_domctl(xch, &domctl);
+        if ( err && errno == E2BIG )
         {
             if ( max_batch_sz <= 1 )
                 break;
             max_batch_sz >>= 1;
             continue;
         }
-        if ( rc > 0 )
-        {
-            done += rc;
-            continue;
-        }
         /* Save the first error... */
         if ( !ret )
-            ret = rc;
+            ret = err;
         /* .. and ignore the rest of them when removing. */
-        if ( rc && add_mapping != DPCI_REMOVE_MAPPING )
+        if ( err && add_mapping != DPCI_REMOVE_MAPPING )
             break;
 
         done += nr;
@@ -2069,6 +2344,68 @@ int xc_domain_set_machine_address_size(xc_interface *xch,
     return do_domctl(xch, &domctl);
 }
 
+int xc_domain_memory_translate_gpfn_list(xc_interface *xch,
+                                         uint32_t domid,
+                                         unsigned long nr_gpfns,
+                                         xen_pfn_t *gpfn_list,
+                                         xen_pfn_t *mfn_list)
+{
+    int err;
+    DECLARE_HYPERCALL_BOUNCE(gpfn_list, nr_gpfns * sizeof (*gpfn_list),
+                             XC_HYPERCALL_BUFFER_BOUNCE_IN);
+    DECLARE_HYPERCALL_BOUNCE(mfn_list, nr_gpfns * sizeof(*mfn_list),
+                             XC_HYPERCALL_BUFFER_BOUNCE_OUT);
+    struct xen_translate_gpfn_list translate_gpfn_list = {
+        .domid    = domid,
+        .nr_gpfns = nr_gpfns,
+    };
+
+    if ( xc_hypercall_bounce_pre(xch, gpfn_list) )
+        return -1;
+    if ( xc_hypercall_bounce_pre(xch, mfn_list) )
+        return -1;
+
+    set_xen_guest_handle(translate_gpfn_list.gpfn_list, gpfn_list);
+    set_xen_guest_handle(translate_gpfn_list.mfn_list, mfn_list);
+
+    err = do_memory_op(xch, XENMEM_translate_gpfn_list, &translate_gpfn_list, sizeof (translate_gpfn_list));
+
+    xc_hypercall_bounce_post(xch, gpfn_list);
+    xc_hypercall_bounce_post(xch, mfn_list);
+
+    if ( err >= 0 )
+        return 0;
+    errno = -err;
+    return -1;
+}
+
+int xc_domain_memory_release_mfn_list(xc_interface *xch,
+                                      uint32_t domid,
+                                      unsigned long nr_mfns,
+                                      xen_pfn_t *mfn_list)
+{
+    int err;
+    DECLARE_HYPERCALL_BOUNCE(mfn_list, nr_mfns * sizeof(*mfn_list),
+                             XC_HYPERCALL_BUFFER_BOUNCE_IN);
+    struct xen_release_mfn_list release_mfn_list = {
+        .domid    = domid,
+        .nr_mfns = nr_mfns,
+    };
+
+    if ( xc_hypercall_bounce_pre(xch, mfn_list) )
+        return -1;
+
+    set_xen_guest_handle(release_mfn_list.mfn_list, mfn_list);
+
+    err = do_memory_op(xch, XENMEM_release_mfn_list, &release_mfn_list, sizeof (release_mfn_list));
+
+    xc_hypercall_bounce_post(xch, mfn_list);
+
+    if ( err >= 0 )
+        return 0;
+    errno = -err;
+    return -1;
+}
 
 int xc_domain_get_machine_address_size(xc_interface *xch, uint32_t domid)
 {
@@ -2283,14 +2620,6 @@ int xc_domain_getvnuma(xc_interface *xch,
     return rc;
 }
 
-int xc_domain_soft_reset(xc_interface *xch,
-                         uint32_t domid)
-{
-    DECLARE_DOMCTL;
-    domctl.cmd = XEN_DOMCTL_soft_reset;
-    domctl.domain = (domid_t)domid;
-    return do_domctl(xch, &domctl);
-}
 /*
  * Local variables:
  * mode: C

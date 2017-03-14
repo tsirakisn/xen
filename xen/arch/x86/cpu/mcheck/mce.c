@@ -6,6 +6,7 @@
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/kernel.h>
+#include <xen/config.h>
 #include <xen/smp.h>
 #include <xen/errno.h>
 #include <xen/console.h>
@@ -18,11 +19,8 @@
 #include <xen/cpu.h>
 
 #include <asm/processor.h>
-#include <asm/setup.h>
 #include <asm/system.h>
-#include <asm/apic.h>
 #include <asm/msr.h>
-#include <asm/p2m.h>
 
 #include "mce.h"
 #include "barrier.h"
@@ -30,8 +28,8 @@
 #include "util.h"
 #include "vmce.h"
 
-bool_t __read_mostly opt_mce = 1;
-boolean_param("mce", opt_mce);
+bool_t __read_mostly mce_disabled;
+invbool_param("mce", mce_disabled);
 bool_t __read_mostly mce_broadcast = 0;
 bool_t is_mc_panic;
 unsigned int __read_mostly nr_mce_banks;
@@ -50,15 +48,14 @@ struct mca_banks *mca_allbanks;
 #define _MC_MSRINJ_F_REQ_HWCR_WREN (1 << 16)
 
 #if 0
-#define x86_mcerr(fmt, err, args...)                                    \
-    ({                                                                  \
-        int _err = (err);                                               \
-        gdprintk(XENLOG_WARNING, "x86_mcerr: " fmt ", returning %d\n",  \
-                 ## args, _err);                                        \
-        _err;                                                           \
-    })
+static int x86_mcerr(const char *msg, int err)
+{
+    gdprintk(XENLOG_WARNING, "x86_mcerr: %s, returning %d\n",
+             msg != NULL ? msg : "", err);
+    return err;
+}
 #else
-#define x86_mcerr(fmt, err, args...) (err)
+#define x86_mcerr(msg, err) (err)
 #endif
 
 int mce_verbosity;
@@ -77,7 +74,7 @@ static void unexpected_machine_check(const struct cpu_user_regs *regs)
 {
     console_force_unlock();
     printk("Unexpected Machine Check Exception\n");
-    fatal_trap(regs, 1);
+    fatal_trap(regs);
 }
 
 
@@ -108,7 +105,7 @@ void x86_mce_callback_register(x86_mce_callback_t cbfunc)
     mc_callback_bank_extended = cbfunc;
 }
 
-/* Machine check recoverable judgement callback handler
+/* Machine check recoverable judgement callback handler 
  * It is used to judge whether an UC error is recoverable by software
  */
 static mce_recoverable_t mc_recoverable_scan = NULL;
@@ -163,9 +160,9 @@ static void mcabank_clear(int banknum)
 }
 
 /* Judging whether to Clear Machine Check error bank callback handler
- * According to Intel latest MCA OS Recovery Writer's Guide,
+ * According to Intel latest MCA OS Recovery Writer's Guide, 
  * whether the error MCA bank needs to be cleared is decided by the mca_source
- * and MCi_status bit value.
+ * and MCi_status bit value. 
  */
 static mce_need_clearbank_t mc_need_clearbank_scan = NULL;
 
@@ -204,7 +201,7 @@ static void mca_init_bank(enum mca_source who,
     if (!mi)
         return;
 
-    mib = x86_mcinfo_reserve(mi, sizeof(*mib), MC_TYPE_BANK);
+    mib = x86_mcinfo_reserve(mi, sizeof(*mib));
     if (!mib)
     {
         mi->flags |= MCINFO_FLAGS_UNCOMPLETE;
@@ -213,8 +210,9 @@ static void mca_init_bank(enum mca_source who,
 
     mib->mc_status = mca_rdmsr(MSR_IA32_MCx_STATUS(bank));
 
+    mib->common.type = MC_TYPE_BANK;
+    mib->common.size = sizeof (struct mcinfo_bank);
     mib->mc_bank = bank;
-    mib->mc_domid = DOMID_INVALID;
 
     if (mib->mc_status & MCi_STATUS_MISCV)
         mib->mc_misc = mca_rdmsr(MSR_IA32_MCx_MISC(bank));
@@ -226,7 +224,7 @@ static void mca_init_bank(enum mca_source who,
         (mib->mc_status & MCi_STATUS_ADDRV) &&
         (mc_check_addr(mib->mc_status, mib->mc_misc, MC_ADDR_PHYSICAL)) &&
         (who == MCA_POLLER || who == MCA_CMCI_HANDLER) &&
-        (mfn_valid(_mfn(paddr_to_pfn(mib->mc_addr)))))
+        (mfn_valid(paddr_to_pfn(mib->mc_addr))))
     {
         struct domain *d;
 
@@ -245,13 +243,15 @@ static int mca_init_global(uint32_t flags, struct mcinfo_global *mig)
 {
     uint64_t status;
     int cpu_nr;
-    const struct vcpu *curr = current;
+    struct vcpu *v = current;
+    struct domain *d;
 
     /* Set global information */
+    mig->common.type = MC_TYPE_GLOBAL;
+    mig->common.size = sizeof (struct mcinfo_global);
     status = mca_rdmsr(MSR_IA32_MCG_STATUS);
     mig->mc_gstatus = status;
-    mig->mc_domid = DOMID_INVALID;
-    mig->mc_vcpuid = XEN_MC_VCPUID_INVALID;
+    mig->mc_domid = mig->mc_vcpuid = -1;
     mig->mc_flags = flags;
     cpu_nr = smp_processor_id();
     /* Retrieve detector information */
@@ -259,9 +259,13 @@ static int mca_init_global(uint32_t flags, struct mcinfo_global *mig)
                         &mig->mc_coreid, &mig->mc_core_threadid,
                         &mig->mc_apicid, NULL, NULL, NULL);
 
-    if (curr != INVALID_VCPU) {
-        mig->mc_domid = curr->domain->domain_id;
-        mig->mc_vcpuid = curr->vcpu_id;
+    /* This is really meaningless */
+    if (v != NULL && ((d = v->domain) != NULL)) {
+        mig->mc_domid = d->domain_id;
+        mig->mc_vcpuid = v->vcpu_id;
+    } else {
+        mig->mc_domid = -1;
+        mig->mc_vcpuid = -1;
     }
 
     return 0;
@@ -344,13 +348,16 @@ mcheck_mca_logout(enum mca_source who, struct mca_banks *bankmask,
             if ( (mctc = mctelem_reserve(which)) != NULL ) {
                 mci = mctelem_dataptr(mctc);
                 mcinfo_clear(mci);
-                mig = x86_mcinfo_reserve(mci, sizeof(*mig), MC_TYPE_GLOBAL);
+                mig = x86_mcinfo_reserve(mci, sizeof(*mig));
                 /* mc_info should at least hold up the global information */
                 ASSERT(mig);
                 mca_init_global(mc_flags, mig);
                 /* A hook here to get global extended msrs */
-                if (boot_cpu_data.x86_vendor == X86_VENDOR_INTEL)
-                    intel_get_extended_msrs(mig, mci);
+                {
+                    if (boot_cpu_data.x86_vendor ==
+                        X86_VENDOR_INTEL)
+                        intel_get_extended_msrs(mig, mci);
+                }
             }
         }
 
@@ -528,14 +535,14 @@ void mcheck_cmn_handler(const struct cpu_user_regs *regs)
         }
         atomic_set(&found_error, 0);
     }
-    mce_barrier_exit(&mce_trap_bar);
+    mce_barrier_exit(&mce_trap_bar); 
 
     /* Clear flags after above fatal check */
     mce_barrier_enter(&mce_trap_bar);
     gstatus = mca_rdmsr(MSR_IA32_MCG_STATUS);
     if ((gstatus & MCG_STATUS_MCIP) != 0) {
         mce_printk(MCE_CRITICAL, "MCE: Clear MCIP@ last step");
-        mca_wrmsr(MSR_IA32_MCG_STATUS, 0);
+        mca_wrmsr(MSR_IA32_MCG_STATUS, gstatus & ~MCG_STATUS_MCIP);
     }
     mce_barrier_exit(&mce_trap_bar);
 
@@ -585,8 +592,9 @@ int show_mca_info(int inited, struct cpuinfo_x86 *c)
             [mcheck_intel] = "Intel"
         };
 
-        snprintf(prefix, ARRAY_SIZE(prefix), "%sCPU%u: ",
-                 g_type != mcheck_unset ? XENLOG_WARNING : XENLOG_INFO,
+        snprintf(prefix, ARRAY_SIZE(prefix),
+                 g_type != mcheck_unset ? XENLOG_WARNING "CPU%i: "
+                 : XENLOG_INFO,
                  smp_processor_id());
         BUG_ON(inited >= ARRAY_SIZE(type_str));
         switch (inited) {
@@ -616,7 +624,7 @@ static void set_poll_bankmask(struct cpuinfo_x86 *c)
     mb = per_cpu(poll_bankmask, cpu);
     BUG_ON(!mb);
 
-    if (cmci_support && opt_mce) {
+    if (cmci_support && !mce_disabled) {
         mb->num = per_cpu(no_cmci_banks, cpu)->num;
         bitmap_copy(mb->bank_map, per_cpu(no_cmci_banks, cpu)->bank_map,
                     nr_mce_banks);
@@ -723,7 +731,7 @@ void mcheck_init(struct cpuinfo_x86 *c, bool_t bsp)
 {
     enum mcheck_type inited = mcheck_none;
 
-    if ( !opt_mce )
+    if ( mce_disabled )
     {
         if ( bsp )
             printk(XENLOG_INFO "MCE support disabled by bootparam\n");
@@ -796,8 +804,7 @@ static void mcinfo_clear(struct mc_info *mi)
     x86_mcinfo_nentries(mi) = 0;
 }
 
-void *x86_mcinfo_reserve(struct mc_info *mi,
-                         unsigned int size, unsigned int type)
+void *x86_mcinfo_reserve(struct mc_info *mi, int size)
 {
     int i;
     unsigned long end1, end2;
@@ -824,11 +831,23 @@ void *x86_mcinfo_reserve(struct mc_info *mi,
     /* there's enough space. add entry. */
     x86_mcinfo_nentries(mi)++;
 
-    memset(mic_index, 0, size);
-    mic_index->size = size;
-    mic_index->type = type;
+    return memset(mic_index, 0, size);
+}
 
-    return mic_index;
+void *x86_mcinfo_add(struct mc_info *mi, void *mcinfo)
+{
+    struct mcinfo_common *mic, *buf;
+
+    mic = (struct mcinfo_common *)mcinfo;
+    buf = x86_mcinfo_reserve(mi, mic->size);
+
+    if ( !buf )
+        mce_printk(MCE_CRITICAL,
+                   "mcinfo_add: No space left in mc_info\n");
+    else
+        memcpy(buf, mic, mic->size);
+
+    return buf;
 }
 
 static void x86_mcinfo_apei_save(
@@ -872,7 +891,7 @@ void x86_mcinfo_dump(struct mc_info *mi)
                "CPU%d: Machine Check Exception: %16"PRIx64"\n",
                mc_global->mc_coreid, mc_global->mc_gstatus);
     } else if (mc_global->mc_flags & MC_FLAG_CMCI) {
-        printk(XENLOG_WARNING "CMCI occurred on CPU %d.\n",
+        printk(XENLOG_WARNING "CMCI occurred on CPU %d.\n", 
                mc_global->mc_coreid);
     } else if (mc_global->mc_flags & MC_FLAG_POLLED) {
         printk(XENLOG_WARNING "POLLED occurred on CPU %d.\n",
@@ -959,7 +978,7 @@ static void do_mc_get_cpu_info(void *v)
         cpuid(1, &junk, &ebx, &junk, &junk);
         xcp->mc_clusterid = (ebx >> 24) & 0xff;
     } else
-        xcp->mc_clusterid = get_apic_id();
+        xcp->mc_clusterid = hard_smp_processor_id();
 }
 
 
@@ -1288,7 +1307,7 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
 
     ret = xsm_do_mca(XSM_PRIV);
     if ( ret )
-        return x86_mcerr("", ret);
+        return x86_mcerr(NULL, ret);
 
     if ( copy_from_guest(op, u_xen_mc, 1) )
         return x86_mcerr("do_mca: failed copyin of xen_mc_t", -EFAULT);
@@ -1402,52 +1421,6 @@ long do_mca(XEN_GUEST_HANDLE_PARAM(xen_mc_t) u_xen_mc)
 
         if (mc_msrinject->mcinj_count == 0)
             return 0;
-
-        if ( mc_msrinject->mcinj_flags & MC_MSRINJ_F_GPADDR )
-        {
-            domid_t domid;
-            struct domain *d;
-            struct mcinfo_msr *msr;
-            unsigned int i;
-            paddr_t gaddr;
-            unsigned long gfn, mfn;
-            p2m_type_t t;
-
-            domid = (mc_msrinject->mcinj_domid == DOMID_SELF) ?
-                    current->domain->domain_id : mc_msrinject->mcinj_domid;
-            if ( domid >= DOMID_FIRST_RESERVED )
-                return x86_mcerr("do_mca inject: incompatible flag "
-                                 "MC_MSRINJ_F_GPADDR with domain %d",
-                                 -EINVAL, domid);
-
-            d = get_domain_by_id(domid);
-            if ( d == NULL )
-                return x86_mcerr("do_mca inject: bad domain id %d",
-                                 -EINVAL, domid);
-
-            for ( i = 0, msr = &mc_msrinject->mcinj_msr[0];
-                  i < mc_msrinject->mcinj_count;
-                  i++, msr++ )
-            {
-                gaddr = msr->value;
-                gfn = PFN_DOWN(gaddr);
-                mfn = mfn_x(get_gfn(d, gfn, &t));
-
-                if ( mfn == mfn_x(INVALID_MFN) )
-                {
-                    put_gfn(d, gfn);
-                    put_domain(d);
-                    return x86_mcerr("do_mca inject: bad gfn %#lx of domain %d",
-                                     -EINVAL, gfn, domid);
-                }
-
-                msr->value = pfn_to_paddr(mfn) | (gaddr & (PAGE_SIZE - 1));
-
-                put_gfn(d, gfn);
-            }
-
-            put_domain(d);
-        }
 
         if (!x86_mc_msrinject_verify(mc_msrinject))
             return x86_mcerr("do_mca inject: illegal MSR", -EINVAL);
@@ -1616,6 +1589,9 @@ static enum mce_result mce_action(const struct cpu_user_regs *regs,
         handlers = mce_uhandlers;
     }
 
+    /* At least a default handler should be registerd */
+    ASSERT(handler_num);
+
     local_mi = (struct mc_info*)mctelem_dataptr(mctc);
     x86_mcinfo_lookup(mic, local_mi, MC_TYPE_GLOBAL);
     if (mic == NULL) {
@@ -1648,6 +1624,7 @@ static enum mce_result mce_action(const struct cpu_user_regs *regs,
                 break;
             }
         }
+        ASSERT(i != handler_num);
     }
 
     return worst_result;

@@ -7,6 +7,7 @@
  * Version 2 or later.  See the file COPYING for more details.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -620,7 +621,7 @@ int evtchn_fifo_expand_array(const struct evtchn_expand_array *expand_array)
     int rc;
 
     if ( !d->evtchn_fifo )
-        return -EOPNOTSUPP;
+        return -ENOSYS;
 
     spin_lock(&d->event_lock);
     rc = add_page_to_event_array(d, expand_array->array_gfn);

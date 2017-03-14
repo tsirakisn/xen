@@ -18,7 +18,7 @@
 
 #include "libxl_internal.h"
 
-static char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device)
+char *libxl__device_frontend_path(libxl__gc *gc, libxl__device *device)
 {
     char *dom_path = libxl__xs_get_dompath(gc, device->domid);
 
@@ -94,13 +94,13 @@ int libxl__nic_type(libxl__gc *gc, libxl__device *dev, libxl_nic_type *nictype)
     snictype = libxl__xs_read(gc, XBT_NULL,
                               GCSPRINTF("%s/%s", be_path, "type"));
     if (!snictype) {
-        LOGED(ERROR, dev->domid, "unable to read nictype from %s", be_path);
+        LOGE(ERROR, "unable to read nictype from %s", be_path);
         rc = ERROR_FAIL;
         goto out;
     }
     rc = libxl_nic_type_from_string(snictype, nictype);
     if (rc) {
-        LOGED(ERROR, dev->domid, "unable to parse nictype from %s", be_path);
+        LOGE(ERROR, "unable to parse nictype from %s", be_path);
         goto out;
     }
 
@@ -114,21 +114,15 @@ int libxl__device_generic_add(libxl__gc *gc, xs_transaction_t t,
         libxl__device *device, char **bents, char **fents, char **ro_fents)
 {
     libxl_ctx *ctx = libxl__gc_owner(gc);
-    char *frontend_path = NULL, *backend_path = NULL, *libxl_path;
+    char *frontend_path, *backend_path, *libxl_path;
     struct xs_permissions frontend_perms[2];
     struct xs_permissions ro_frontend_perms[2];
     struct xs_permissions backend_perms[2];
     int create_transaction = t == XBT_NULL;
-    int libxl_only = device->backend_kind == LIBXL__DEVICE_KIND_NONE;
     int rc;
 
-    if (libxl_only) {
-        /* bents should be set as this is used to setup libxl_path content. */
-        assert(!fents && !ro_fents);
-    } else {
-        frontend_path = libxl__device_frontend_path(gc, device);
-        backend_path = libxl__device_backend_path(gc, device);
-    }
+    frontend_path = libxl__device_frontend_path(gc, device);
+    backend_path = libxl__device_backend_path(gc, device);
     libxl_path = libxl__device_libxl_path(gc, device);
 
     frontend_perms[0].id = device->domid;
@@ -150,15 +144,13 @@ retry_transaction:
     rc = libxl__xs_rm_checked(gc, t, libxl_path);
     if (rc) goto out;
 
-    if (!libxl_only) {
-        rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/frontend",libxl_path),
-                                     frontend_path);
-        if (rc) goto out;
+    rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/frontend",libxl_path),
+                                 frontend_path);
+    if (rc) goto out;
 
-        rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/backend",libxl_path),
-                                     backend_path);
-        if (rc) goto out;
-    }
+    rc = libxl__xs_write_checked(gc, t, GCSPRINTF("%s/backend",libxl_path),
+                                 backend_path);
+    if (rc) goto out;
 
     /* xxx much of this function lacks error checks! */
 
@@ -187,15 +179,12 @@ retry_transaction:
     }
 
     if (bents) {
-        if (!libxl_only) {
-            xs_rm(ctx->xsh, t, backend_path);
-            xs_mkdir(ctx->xsh, t, backend_path);
-            xs_set_permissions(ctx->xsh, t, backend_path, backend_perms,
-                               ARRAY_SIZE(backend_perms));
-            xs_write(ctx->xsh, t, GCSPRINTF("%s/frontend", backend_path),
-                     frontend_path, strlen(frontend_path));
-            libxl__xs_writev(gc, t, backend_path, bents);
-        }
+        xs_rm(ctx->xsh, t, backend_path);
+        xs_mkdir(ctx->xsh, t, backend_path);
+        xs_set_permissions(ctx->xsh, t, backend_path, backend_perms, ARRAY_SIZE(backend_perms));
+        xs_write(ctx->xsh, t, GCSPRINTF("%s/frontend", backend_path),
+                 frontend_path, strlen(frontend_path));
+        libxl__xs_writev(gc, t, backend_path, bents);
 
         /*
          * We make a copy of everything for the backend in the libxl
@@ -204,9 +193,6 @@ retry_transaction:
          * would use the information from the json configuration
          * instead.  But there are still places in libxl that try to
          * reconstruct a config from xenstore.
-         *
-         * For devices without PV backend (e.g. USB devices emulated via qemu)
-         * only the libxl path is written.
          *
          * This duplication will typically produces duplicate keys
          * which will go out of date, but that's OK because nothing
@@ -231,7 +217,7 @@ retry_transaction:
         if (errno == EAGAIN)
             goto retry_transaction;
         else {
-            LOGED(ERROR, device->domid, "xs transaction failed");
+            LOGE(ERROR, "xs transaction failed");
             return ERROR_FAIL;
         }
     }
@@ -258,12 +244,10 @@ static int disk_try_backend(disk_try_backend_args *a,
 
     switch (backend) {
     case LIBXL_DISK_BACKEND_PHY:
-        if (a->disk->format != LIBXL_DISK_FORMAT_RAW) {
+        if (!(a->disk->format == LIBXL_DISK_FORMAT_RAW ||
+              a->disk->format == LIBXL_DISK_FORMAT_EMPTY)) {
             goto bad_format;
         }
-
-        if (libxl_defbool_val(a->disk->colo_enable))
-            goto bad_colo;
 
         if (a->disk->backend_domid != LIBXL_TOOLSTACK_DOMID) {
             LOG(DEBUG, "Disk vdev=%s, is using a storage driver domain, "
@@ -287,14 +271,8 @@ static int disk_try_backend(disk_try_backend_args *a,
     case LIBXL_DISK_BACKEND_TAP:
         if (a->disk->script) goto bad_script;
 
-        if (libxl_defbool_val(a->disk->colo_enable))
-            goto bad_colo;
+        /* Note: keep going if the disk is a cdrom. tapdisk can handle them as "raw" */
 
-        if (a->disk->is_cdrom) {
-            LOG(DEBUG, "Disk vdev=%s, backend tap unsuitable for cdroms",
-                       a->disk->vdev);
-            return 0;
-        }
         if (!libxl__blktap_enabled(a->gc)) {
             LOG(DEBUG, "Disk vdev=%s, backend tap unsuitable because blktap "
                        "not available", a->disk->vdev);
@@ -328,11 +306,6 @@ static int disk_try_backend(disk_try_backend_args *a,
     LOG(DEBUG, "Disk vdev=%s, backend %s not compatible with script=...",
         a->disk->vdev, libxl_disk_backend_to_string(backend));
     return 0;
-
- bad_colo:
-    LOG(DEBUG, "Disk vdev=%s, backend %s not compatible with colo",
-        a->disk->vdev, libxl_disk_backend_to_string(backend));
-    return 0;
 }
 
 int libxl__backendpath_parse_domid(libxl__gc *gc, const char *be_path,
@@ -363,12 +336,6 @@ int libxl__device_disk_set_backend(libxl__gc *gc, libxl_device_disk *disk) {
     if (disk->format == LIBXL_DISK_FORMAT_EMPTY) {
         if (!disk->is_cdrom) {
             LOG(ERROR, "Disk vdev=%s is empty but not cdrom", disk->vdev);
-            return ERROR_INVAL;
-        }
-        if (disk->pdev_path != NULL && strcmp(disk->pdev_path, "")) {
-            LOG(ERROR,
-                "Disk vdev=%s is empty but an image has been provided: %s",
-                disk->vdev, disk->pdev_path);
             return ERROR_INVAL;
         }
         memset(&a.stab, 0, sizeof(a.stab));
@@ -411,7 +378,6 @@ char *libxl__device_disk_string_of_format(libxl_disk_format format)
         case LIBXL_DISK_FORMAT_VHD: return "vhd";
         case LIBXL_DISK_FORMAT_RAW:
         case LIBXL_DISK_FORMAT_EMPTY: return "aio";
-        case LIBXL_DISK_FORMAT_QED: return "qed";
         default: return NULL;
     }
 }
@@ -535,63 +501,6 @@ int libxl__device_disk_dev_number(const char *virtpath, int *pdisk,
     return -1;
 }
 
-static char *encode_disk_name(char *ptr, unsigned int n)
-{
-    if (n >= 26)
-        ptr = encode_disk_name(ptr, n / 26 - 1);
-    *ptr = 'a' + n % 26;
-    return ptr + 1;
-}
-
-char *libxl__devid_to_vdev(libxl__gc *gc, int devid)
-{
-    unsigned int minor;
-    int offset;
-    int nr_parts;
-    char *ptr = NULL;
-/* Same as in Linux.
- * encode_disk_name might end up using up to 29 bytes (BUFFER_SIZE - 3)
- * including the trailing \0.
- *
- * The code is safe because 26 raised to the power of 28 (that is the
- * maximum offset that can be stored in the allocated buffer as a
- * string) is far greater than UINT_MAX on 64 bits so offset cannot be
- * big enough to exhaust the available bytes in ret. */
-#define BUFFER_SIZE 32
-    char *ret = libxl__zalloc(gc, BUFFER_SIZE);
-
-#define EXT_SHIFT 28
-#define EXTENDED (1<<EXT_SHIFT)
-#define VDEV_IS_EXTENDED(dev) ((dev)&(EXTENDED))
-#define BLKIF_MINOR_EXT(dev) ((dev)&(~EXTENDED))
-/* the size of the buffer to store the device name is 32 bytes to match the
- * equivalent buffer in the Linux kernel code */
-
-    if (!VDEV_IS_EXTENDED(devid)) {
-        minor = devid & 0xff;
-        nr_parts = 16;
-    } else {
-        minor = BLKIF_MINOR_EXT(devid);
-        nr_parts = 256;
-    }
-    offset = minor / nr_parts;
-
-    strcpy(ret, "xvd");
-    ptr = encode_disk_name(ret + 3, offset);
-    if (minor % nr_parts == 0)
-        *ptr = 0;
-    else
-        /* overflow cannot happen, thanks to the upper bound */
-        snprintf(ptr, ret + 32 - ptr,
-                "%d", minor & (nr_parts - 1));
-    return ret;
-#undef BUFFER_SIZE
-#undef EXT_SHIFT
-#undef EXTENDED
-#undef VDEV_IS_EXTENDED
-#undef BLKIF_MINOR_EXT
-}
-
 /* Device AO operations */
 
 void libxl__prepare_ao_device(libxl__ao *ao, libxl__ao_device *aodev)
@@ -692,23 +601,48 @@ void libxl__multidev_prepared(libxl__egc *egc,
 
 /******************************************************************************/
 
+/* Macro for defining the functions that will add a bunch of disks when
+ * inside an async op with multidev.
+ * This macro is added to prevent repetition of code.
+ *
+ * The following functions are defined:
+ * libxl__add_disks
+ * libxl__add_nics
+ * libxl__add_vtpms
+ */
+
+#define DEFINE_DEVICES_ADD(type)                                        \
+    void libxl__add_##type##s(libxl__egc *egc, libxl__ao *ao, uint32_t domid, \
+                              libxl_domain_config *d_config,            \
+                              libxl__multidev *multidev)                \
+    {                                                                   \
+        AO_GC;                                                          \
+        int i;                                                          \
+        for (i = 0; i < d_config->num_##type##s; i++) {                 \
+            libxl__ao_device *aodev = libxl__multidev_prepare(multidev);  \
+            libxl__device_##type##_add(egc, domid, &d_config->type##s[i], \
+                                       aodev);                          \
+        }                                                               \
+    }
+
+DEFINE_DEVICES_ADD(disk)
+DEFINE_DEVICES_ADD(nic)
+DEFINE_DEVICES_ADD(vtpm)
+
+#undef DEFINE_DEVICES_ADD
+
+/******************************************************************************/
+
 int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
 {
-    const char *be_path = NULL;
-    const char *fe_path = NULL;
+    const char *be_path = libxl__device_backend_path(gc, dev);
+    const char *fe_path = libxl__device_frontend_path(gc, dev);
     const char *libxl_path = libxl__device_libxl_path(gc, dev);
-    const char *tapdisk_path = NULL;
-    const char *tapdisk_params = NULL;
+    const char *tapdisk_path = GCSPRINTF("%s/%s", be_path, "tapdisk-params");
+    const char *tapdisk_params;
     xs_transaction_t t = 0;
     int rc;
     uint32_t domid;
-    int libxl_only = dev->backend_kind == LIBXL__DEVICE_KIND_NONE;
-
-    if (!libxl_only) {
-        be_path = libxl__device_backend_path(gc, dev);
-        fe_path = libxl__device_frontend_path(gc, dev);
-        tapdisk_path = GCSPRINTF("%s/%s", be_path, "tapdisk-params");
-    }
 
     rc = libxl__get_domid(gc, &domid);
     if (rc) goto out;
@@ -718,21 +652,18 @@ int libxl__device_destroy(libxl__gc *gc, libxl__device *dev)
         if (rc) goto out;
 
         /* May not exist if this is not a tap device */
-        if (tapdisk_path) {
-            rc = libxl__xs_read_checked(gc, t, tapdisk_path, &tapdisk_params);
-            if (rc) goto out;
-        }
+        rc = libxl__xs_read_checked(gc, t, tapdisk_path, &tapdisk_params);
+        if (rc) goto out;
 
         if (domid == LIBXL_TOOLSTACK_DOMID) {
             /*
              * The toolstack domain is in charge of removing the
              * frontend and libxl paths.
              */
-            if (!libxl_only)
-                libxl__xs_path_cleanup(gc, t, fe_path);
+            libxl__xs_path_cleanup(gc, t, fe_path);
             libxl__xs_path_cleanup(gc, t, libxl_path);
         }
-        if (dev->backend_domid == domid && !libxl_only) {
+        if (dev->backend_domid == domid) {
             /*
              * The driver domain is in charge of removing what it can
              * from the backend path.
@@ -812,10 +743,7 @@ void libxl__devices_destroy(libxl__egc *egc, libxl__devices_remove_state *drs)
                 aodev->action = LIBXL__DEVICE_ACTION_REMOVE;
                 aodev->dev = dev;
                 aodev->force = drs->force;
-                if (dev->kind == LIBXL__DEVICE_KIND_VUSB)
-                    libxl__initiate_device_usbctrl_remove(egc, aodev);
-                else
-                    libxl__initiate_device_generic_remove(egc, aodev);
+                libxl__initiate_device_remove(egc, aodev);
             }
         }
     }
@@ -886,7 +814,7 @@ void libxl__wait_device_connection(libxl__egc *egc, libxl__ao_device *aodev)
                                  state_path, XenbusStateInitWait,
                                  LIBXL_INIT_TIMEOUT * 1000);
     if (rc) {
-        LOGD(ERROR, aodev->dev->domid, "unable to initialize device %s", be_path);
+        LOG(ERROR, "unable to initialize device %s", be_path);
         goto out;
     }
 
@@ -898,8 +826,8 @@ out:
     return;
 }
 
-void libxl__initiate_device_generic_remove(libxl__egc *egc,
-                                           libxl__ao_device *aodev)
+void libxl__initiate_device_remove(libxl__egc *egc,
+                                   libxl__ao_device *aodev)
 {
     STATE_AO_GC(aodev->ao);
     xs_transaction_t t = 0;
@@ -915,28 +843,28 @@ void libxl__initiate_device_generic_remove(libxl__egc *egc,
 
     rc = libxl__get_domid(gc, &my_domid);
     if (rc) {
-        LOGD(ERROR, domid, "unable to get my domid");
+        LOG(ERROR, "unable to get my domid");
         goto out;
     }
 
     if (my_domid == LIBXL_TOOLSTACK_DOMID) {
         rc = libxl_domain_info(CTX, &info, domid);
         if (rc) {
-            LOGD(ERROR, domid, "unable to get info for domain %d", domid);
+            LOG(ERROR, "unable to get info for domain %d", domid);
             goto out;
         }
         if (QEMU_BACKEND(aodev->dev) &&
             (info.paused || info.dying || info.shutdown)) {
             /*
              * TODO: 4.2 Bodge due to QEMU, see comment on top of
-             * libxl__initiate_device_generic_remove in libxl_internal.h
+             * libxl__initiate_device_remove in libxl_internal.h
              */
             rc = libxl__ev_time_register_rel(ao, &aodev->timeout,
                                              device_qemu_timeout,
                                              LIBXL_QEMU_BODGE_TIMEOUT * 1000);
             if (rc) {
-                LOGD(ERROR, domid, "unable to register timeout for Qemu device %s",
-                            be_path);
+                LOG(ERROR, "unable to register timeout for Qemu device %s",
+                           be_path);
                 goto out;
             }
             goto out_success;
@@ -946,7 +874,7 @@ void libxl__initiate_device_generic_remove(libxl__egc *egc,
     for (;;) {
         rc = libxl__xs_transaction_start(gc, &t);
         if (rc) {
-            LOGD(ERROR, domid, "unable to start transaction");
+            LOG(ERROR, "unable to start transaction");
             goto out;
         }
 
@@ -956,7 +884,7 @@ void libxl__initiate_device_generic_remove(libxl__egc *egc,
 
         rc = libxl__xs_read_checked(gc, t, state_path, &state);
         if (rc) {
-            LOGD(ERROR, domid, "unable to read device state from path %s", state_path);
+            LOG(ERROR, "unable to read device state from path %s", state_path);
             goto out;
         }
 
@@ -971,7 +899,7 @@ void libxl__initiate_device_generic_remove(libxl__egc *egc,
          if (state && atoi(state) != XenbusStateClosed) {
             rc = libxl__xs_write_checked(gc, t, state_path, GCSPRINTF("%d", XenbusStateClosing));
             if (rc) {
-                LOGD(ERROR, domid, "unable to write to xenstore path %s", state_path);
+                LOG(ERROR, "unable to write to xenstore path %s", state_path);
                 goto out;
             }
         }
@@ -986,7 +914,7 @@ void libxl__initiate_device_generic_remove(libxl__egc *egc,
                                  state_path, XenbusStateClosed,
                                  LIBXL_DESTROY_TIMEOUT * 1000);
     if (rc) {
-        LOGD(ERROR, domid, "unable to remove device %s", be_path);
+        LOG(ERROR, "unable to remove device %s", be_path);
         goto out;
     }
 
@@ -1020,7 +948,7 @@ static void device_qemu_timeout(libxl__egc *egc, libxl__ev_time *ev,
     for (;;) {
         rc = libxl__xs_transaction_start(gc, &t);
         if (rc) {
-            LOGD(ERROR, aodev->dev->domid, "unable to start transaction");
+            LOG(ERROR, "unable to start transaction");
             goto out;
         }
 
@@ -1057,22 +985,22 @@ static void device_backend_callback(libxl__egc *egc, libxl__ev_devstate *ds,
     libxl__ao_device *aodev = CONTAINER_OF(ds, *aodev, backend_ds);
     STATE_AO_GC(aodev->ao);
 
-    LOGD(DEBUG, aodev->dev->domid, "calling device_backend_cleanup");
+    LOG(DEBUG, "calling device_backend_cleanup");
     device_backend_cleanup(gc, aodev);
 
     if (rc == ERROR_TIMEDOUT &&
         aodev->action == LIBXL__DEVICE_ACTION_REMOVE &&
         !aodev->force) {
-        LOGD(DEBUG, aodev->dev->domid, "Timeout reached, initiating forced remove");
+        LOG(DEBUG, "Timeout reached, initiating forced remove");
         aodev->force = 1;
-        libxl__initiate_device_generic_remove(egc, aodev);
+        libxl__initiate_device_remove(egc, aodev);
         return;
     }
 
     if (rc) {
-        LOGD(ERROR, aodev->dev->domid, "unable to %s device with path %s",
-                    libxl__device_action_to_string(aodev->action),
-                    libxl__device_backend_path(gc, aodev->dev));
+        LOG(ERROR, "unable to %s device with path %s",
+                   libxl__device_action_to_string(aodev->action),
+                   libxl__device_backend_path(gc, aodev->dev));
         goto out;
     }
 
@@ -1107,13 +1035,12 @@ static void device_hotplug(libxl__egc *egc, libxl__ao_device *aodev)
      */
     rc = libxl__get_domid(gc, &domid);
     if (rc) {
-        LOGD(ERROR, aodev->dev->domid, "Failed to get domid");
+        LOG(ERROR, "Failed to get domid");
         goto out;
     }
     if (aodev->dev->backend_domid != domid) {
-        LOGD(DEBUG, aodev->dev->domid,
-             "Backend domid %d, domid %d, assuming driver domains",
-             aodev->dev->backend_domid, domid);
+        LOG(DEBUG, "Backend domid %d, domid %d, assuming driver domains",
+            aodev->dev->backend_domid, domid);
 
         if (aodev->action != LIBXL__DEVICE_ACTION_REMOVE) {
             LOG(DEBUG, "Not a remove, not executing hotplug scripts");
@@ -1127,8 +1054,7 @@ static void device_hotplug(libxl__egc *egc, libxl__ao_device *aodev)
         aodev->xswait.callback = device_destroy_be_watch_cb;
         rc = libxl__xswait_start(gc, &aodev->xswait);
         if (rc) {
-            LOGD(ERROR, aodev->dev->domid,
-                 "Setup of backend removal watch failed (path %s)", be_path);
+            LOG(ERROR, "Setup of backend removal watch failed (path %s)", be_path);
             goto out;
         }
 
@@ -1143,44 +1069,24 @@ static void device_hotplug(libxl__egc *egc, libxl__ao_device *aodev)
     switch (hotplug) {
     case 0:
         /* no hotplug script to execute */
-        LOGD(DEBUG, aodev->dev->domid, "No hotplug script to execute");
+        LOG(DEBUG, "No hotplug script to execute");
         goto out;
     case 1:
         /* execute hotplug script */
         break;
     default:
         /* everything else is an error */
-        LOGD(ERROR, aodev->dev->domid,
-                    "unable to get args/env to execute hotplug script for "
-                    "device %s", libxl__device_backend_path(gc, aodev->dev));
+        LOG(ERROR, "unable to get args/env to execute hotplug script for "
+                   "device %s", libxl__device_backend_path(gc, aodev->dev));
         rc = hotplug;
         goto out;
     }
 
-    assert(args != NULL);
-    LOGD(DEBUG, aodev->dev->domid, "calling hotplug script: %s %s", args[0], args[1]);
-    LOGD(DEBUG, aodev->dev->domid, "extra args:");
-    {
-        const char *arg;
-        unsigned int x;
-
-        for (x = 2; (arg = args[x]); x++)
-            LOGD(DEBUG, aodev->dev->domid, "\t%s", arg);
-    }
-    LOGD(DEBUG, aodev->dev->domid, "env:");
-    if (env != NULL) {
-        const char *k, *v;
-        unsigned int x;
-
-        for (x = 0; (k = env[x]); x += 2) {
-            v = env[x+1];
-            LOGD(DEBUG, aodev->dev->domid, "\t%s: %s", k, v);
-        }
-    }
+    LOG(DEBUG, "calling hotplug script: %s %s", args[0], args[1]);
 
     nullfd = open("/dev/null", O_RDONLY);
     if (nullfd < 0) {
-        LOGD(ERROR, aodev->dev->domid, "unable to open /dev/null for hotplug script");
+        LOG(ERROR, "unable to open /dev/null for hotplug script");
         rc = ERROR_FAIL;
         goto out;
     }
@@ -1264,9 +1170,8 @@ static void device_destroy_be_watch_cb(libxl__egc *egc,
 
     if (rc) {
         if (rc == ERROR_TIMEDOUT)
-            LOGD(ERROR, aodev->dev->domid,
-                 "timed out while waiting for %s to be removed",
-                 xswait->path);
+            LOG(ERROR, "timed out while waiting for %s to be removed",
+                xswait->path);
         aodev->rc = rc;
         goto out;
     }
@@ -1329,7 +1234,7 @@ int libxl__wait_for_device_model_deprecated(libxl__gc *gc,
     char *path;
     uint32_t dm_domid = libxl_get_stubdom_id(CTX, domid);
 
-    path = DEVICE_MODEL_XS_PATH(gc, dm_domid, domid, "/state");
+    path = libxl__device_model_xs_path(gc, dm_domid, domid, "/state");
     return libxl__xenstore_child_wait_deprecated(gc, domid,
                                      LIBXL_DEVICE_MODEL_START_TIMEOUT,
                                      "Device Model", path, state, spawning,
@@ -1362,418 +1267,30 @@ int libxl__wait_for_backend(libxl__gc *gc, const char *be_path,
     return ERROR_FAIL;
 }
 
-/* generic callback for devices that only need to set ao_complete */
-void device_addrm_aocomplete(libxl__egc *egc, libxl__ao_device *aodev)
+int libxl__wait_for_backend_device(libxl__gc *gc, const char *be_path,
+                                       int id, const char *state)
 {
-    STATE_AO_GC(aodev->ao);
-
-    if (aodev->rc) {
-        if (aodev->dev) {
-            LOGD(ERROR, aodev->dev->domid, "Unable to %s %s with id %u",
-                        libxl__device_action_to_string(aodev->action),
-                        libxl__device_kind_to_string(aodev->dev->kind),
-                        aodev->dev->devid);
-        } else {
-            LOG(ERROR, "unable to %s device",
-                       libxl__device_action_to_string(aodev->action));
-        }
-        goto out;
-    }
-
-out:
-    libxl__ao_complete(egc, ao, aodev->rc);
-    return;
-}
-
-/* common function to get next device id */
-int libxl__device_nextid(libxl__gc *gc, uint32_t domid, char *device)
-{
-    char *libxl_dom_path, **l;
-    unsigned int nb;
-    int nextid = -1;
-
-    if (!(libxl_dom_path = libxl__xs_libxl_path(gc, domid)))
-        return nextid;
-
-    l = libxl__xs_directory(gc, XBT_NULL,
-        GCSPRINTF("%s/device/%s", libxl_dom_path, device),
-                            &nb);
-    if (l == NULL || nb == 0)
-        nextid = 0;
-    else
-        nextid = strtoul(l[nb - 1], NULL, 10) + 1;
-
-    return nextid;
-}
-
-static void device_complete(libxl__egc *egc, libxl__ao_device *aodev)
-{
-    STATE_AO_GC(aodev->ao);
-
-    LOG(DEBUG, "device %s %s %s",
-               libxl__device_backend_path(gc, aodev->dev),
-               libxl__device_action_to_string(aodev->action),
-               aodev->rc ? "failed" : "succeed");
-
-    if (aodev->action == LIBXL__DEVICE_ACTION_REMOVE)
-        free(aodev->dev);
-
-    libxl__nested_ao_free(aodev->ao);
-}
-
-static void qdisk_spawn_outcome(libxl__egc *egc, libxl__dm_spawn_state *dmss,
-                                int rc)
-{
-    STATE_AO_GC(dmss->spawn.ao);
-
-    LOGD(DEBUG, dmss->guest_domid, "qdisk backend spawn %s",
-                rc ? "failed" : "succeed");
-
-    libxl__nested_ao_free(dmss->spawn.ao);
-}
-
-/*
- * Data structures used to track devices handled by driver domains
- */
-
-/*
- * Structure that describes a device handled by a driver domain
- */
-typedef struct libxl__ddomain_device {
-    libxl__device *dev;
-    LIBXL_SLIST_ENTRY(struct libxl__ddomain_device) next;
-} libxl__ddomain_device;
-
-/*
- * Structure that describes a domain and it's associated devices
- */
-typedef struct libxl__ddomain_guest {
-    uint32_t domid;
-    int num_vifs, num_vbds, num_qdisks;
-    LIBXL_SLIST_HEAD(, struct libxl__ddomain_device) devices;
-    LIBXL_SLIST_ENTRY(struct libxl__ddomain_guest) next;
-} libxl__ddomain_guest;
-
-/*
- * Main structure used by a driver domain to keep track of devices
- * currently in use
- */
-typedef struct {
-    libxl__ao *ao;
-    libxl__ev_xswatch watch;
-    LIBXL_SLIST_HEAD(, struct libxl__ddomain_guest) guests;
-} libxl__ddomain;
-
-static libxl__ddomain_guest *search_for_guest(libxl__ddomain *ddomain,
-                                               uint32_t domid)
-{
-    libxl__ddomain_guest *dguest;
-
-    LIBXL_SLIST_FOREACH(dguest, &ddomain->guests, next) {
-        if (dguest->domid == domid)
-            return dguest;
-    }
-    return NULL;
-}
-
-static libxl__ddomain_device *search_for_device(libxl__ddomain_guest *dguest,
-                                                libxl__device *dev)
-{
-    libxl__ddomain_device *ddev;
-
-    LIBXL_SLIST_FOREACH(ddev, &dguest->devices, next) {
-#define LIBXL_DEVICE_CMP(dev1, dev2, entry) (dev1->entry == dev2->entry)
-        if (LIBXL_DEVICE_CMP(ddev->dev, dev, backend_devid) &&
-            LIBXL_DEVICE_CMP(ddev->dev, dev, backend_domid) &&
-            LIBXL_DEVICE_CMP(ddev->dev, dev, devid) &&
-            LIBXL_DEVICE_CMP(ddev->dev, dev, domid) &&
-            LIBXL_DEVICE_CMP(ddev->dev, dev, backend_kind) &&
-            LIBXL_DEVICE_CMP(ddev->dev, dev, kind))
-            return ddev;
-#undef LIBXL_DEVICE_CMP
-    }
-
-    return NULL;
-}
-
-/*
- * The following comment applies to both add_device and remove_device.
- *
- * If the return value is greater than 0, it means there's no ao dispatched,
- * so the free of the nested ao should be done by the parent when it has
- * finished.
- */
-static int add_device(libxl__egc *egc, libxl__ao *ao,
-                      libxl__ddomain_guest *dguest,
-                      libxl__ddomain_device *ddev)
-{
-    AO_GC;
-    libxl__device *dev = ddev->dev;
-    libxl__ao_device *aodev;
-    libxl__dm_spawn_state *dmss;
-    int rc = 0;
-
-    switch(dev->backend_kind) {
-    case LIBXL__DEVICE_KIND_VBD:
-    case LIBXL__DEVICE_KIND_VIF:
-        if (dev->backend_kind == LIBXL__DEVICE_KIND_VBD) dguest->num_vbds++;
-        if (dev->backend_kind == LIBXL__DEVICE_KIND_VIF) dguest->num_vifs++;
-
-        GCNEW(aodev);
-        libxl__prepare_ao_device(ao, aodev);
-        aodev->dev = dev;
-        aodev->action = LIBXL__DEVICE_ACTION_ADD;
-        aodev->callback = device_complete;
-        libxl__wait_device_connection(egc, aodev);
-
-        break;
-    case LIBXL__DEVICE_KIND_QDISK:
-        if (dguest->num_qdisks == 0) {
-            GCNEW(dmss);
-            dmss->guest_domid = dev->domid;
-            dmss->spawn.ao = ao;
-            dmss->callback = qdisk_spawn_outcome;
-
-            libxl__spawn_qdisk_backend(egc, dmss);
-        }
-        dguest->num_qdisks++;
-
-        break;
-    default:
-        rc = 1;
-        break;
-    }
-
-    return rc;
-}
-
-static int remove_device(libxl__egc *egc, libxl__ao *ao,
-                         libxl__ddomain_guest *dguest,
-                         libxl__ddomain_device *ddev)
-{
-    AO_GC;
-    libxl__device *dev = ddev->dev;
-    libxl__ao_device *aodev;
-    int rc = 0;
-
-    switch(ddev->dev->backend_kind) {
-    case LIBXL__DEVICE_KIND_VBD:
-    case LIBXL__DEVICE_KIND_VIF:
-        if (dev->backend_kind == LIBXL__DEVICE_KIND_VBD) dguest->num_vbds--;
-        if (dev->backend_kind == LIBXL__DEVICE_KIND_VIF) dguest->num_vifs--;
-
-        GCNEW(aodev);
-        libxl__prepare_ao_device(ao, aodev);
-        aodev->dev = dev;
-        aodev->action = LIBXL__DEVICE_ACTION_REMOVE;
-        aodev->callback = device_complete;
-        libxl__initiate_device_generic_remove(egc, aodev);
-        break;
-    case LIBXL__DEVICE_KIND_QDISK:
-        if (--dguest->num_qdisks == 0) {
-            rc = libxl__destroy_qdisk_backend(gc, dev->domid);
-            if (rc)
-                goto out;
-        }
-        libxl__device_destroy(gc, dev);
-        free(dev);
-        /* Fall through to return > 0, no ao has been dispatched */
-    default:
-        rc = 1;
-        break;
-    }
-
-out:
-    return rc;
-}
-
-static void backend_watch_callback(libxl__egc *egc, libxl__ev_xswatch *watch,
-                                   const char *watch_path,
-                                   const char *event_path)
-{
-    libxl__ddomain *ddomain = CONTAINER_OF(watch, *ddomain, watch);
-    libxl__ao *nested_ao = libxl__nested_ao_create(ddomain->ao);
-    STATE_AO_GC(nested_ao);
-    char *p, *path;
-    const char *sstate, *sonline;
-    int state, online, rc, num_devs;
-    libxl__device *dev = NULL;
-    libxl__ddomain_device *ddev = NULL;
-    libxl__ddomain_guest *dguest = NULL;
-    bool free_ao = false;
-
-    /* Check if event_path ends with "state" or "online" and truncate it. */
-    path = libxl__strdup(gc, event_path);
-    p = strrchr(path, '/');
-    if (p == NULL)
-        goto skip;
-    if (strcmp(p, "/state") != 0 && strcmp(p, "/online") != 0)
-        goto skip;
-    /* Truncate the string so it points to the backend directory. */
-    *p = '\0';
-
-    /* Fetch the value of the state and online nodes. */
-    rc = libxl__xs_read_checked(gc, XBT_NULL, GCSPRINTF("%s/state", path),
-                                &sstate);
-    if (rc || !sstate)
-        goto skip;
-    state = atoi(sstate);
-
-    rc = libxl__xs_read_checked(gc, XBT_NULL, GCSPRINTF("%s/online", path),
-                                &sonline);
-    if (rc || !sonline)
-        goto skip;
-    online = atoi(sonline);
-
-    dev = libxl__zalloc(NOGC, sizeof(*dev));
-    rc = libxl__parse_backend_path(gc, path, dev);
-    if (rc)
-        goto skip;
-
-    dguest = search_for_guest(ddomain, dev->domid);
-    if (dguest == NULL && state == XenbusStateClosed) {
-        /*
-         * Spurious state change, device has already been disconnected
-         * or never attached.
-         */
-        goto skip;
-    }
-    if (dguest == NULL) {
-        /* Create a new guest struct and initialize it */
-        dguest = libxl__zalloc(NOGC, sizeof(*dguest));
-        dguest->domid = dev->domid;
-        LIBXL_SLIST_INIT(&dguest->devices);
-        LIBXL_SLIST_INSERT_HEAD(&ddomain->guests, dguest, next);
-        LOGD(DEBUG, dguest->domid, "Added domain to the list of active guests");
-    }
-    ddev = search_for_device(dguest, dev);
-    if (ddev == NULL && state == XenbusStateClosed) {
-        /*
-         * Spurious state change, device has already been disconnected
-         * or never attached.
-         */
-        goto skip;
-    } else if (ddev == NULL) {
-        /*
-         * New device addition, allocate a struct to hold it and add it
-         * to the list of active devices for a given guest.
-         */
-        ddev = libxl__zalloc(NOGC, sizeof(*ddev));
-        ddev->dev = dev;
-        LIBXL_SLIST_INSERT_HEAD(&dguest->devices, ddev, next);
-        LOGD(DEBUG, dev->domid, "Added device %s to the list of active devices",
-             path);
-        rc = add_device(egc, nested_ao, dguest, ddev);
-        if (rc > 0)
-            free_ao = true;
-    } else if (state == XenbusStateClosed && online == 0) {
-        /*
-         * Removal of an active device, remove it from the list and
-         * free it's data structures if they are no longer needed.
-         *
-         * The free of the associated libxl__device is left to the
-         * helper remove_device function.
-         */
-        LIBXL_SLIST_REMOVE(&dguest->devices, ddev, libxl__ddomain_device,
-                           next);
-        LOGD(DEBUG, dev->domid, "Removed device %s from the list of active devices",
-             path);
-        rc = remove_device(egc, nested_ao, dguest, ddev);
-        if (rc > 0)
-            free_ao = true;
-
-        free(ddev);
-        /* If this was the last device in the domain, remove it from the list */
-        num_devs = dguest->num_vifs + dguest->num_vbds + dguest->num_qdisks;
-        if (num_devs == 0) {
-            LIBXL_SLIST_REMOVE(&ddomain->guests, dguest, libxl__ddomain_guest,
-                               next);
-            LOGD(DEBUG, dguest->domid, "Removed domain from the list of active guests");
-            /* Clear any leftovers in libxl/<domid> */
-            libxl__xs_rm_checked(gc, XBT_NULL,
-                                 GCSPRINTF("libxl/%u", dguest->domid));
-            free(dguest);
-        }
-    }
-
-    if (free_ao)
-        libxl__nested_ao_free(nested_ao);
-
-    return;
-
-skip:
-    libxl__nested_ao_free(nested_ao);
-    free(dev);
-    free(ddev);
-    free(dguest);
-    return;
-}
-
-/* Handler of events for device driver domains */
-int libxl_device_events_handler(libxl_ctx *ctx,
-                                const libxl_asyncop_how *ao_how)
-{
-    AO_CREATE(ctx, 0, ao_how);
+    int watchdog = 100;
+    const char *p, *path = GCSPRINTF("%s/state-%d", be_path, id);
     int rc;
-    uint32_t domid;
-    libxl__ddomain ddomain;
-    char *be_path;
-    char **kinds = NULL, **domains = NULL, **devs = NULL;
-    const char *sstate;
-    char *state_path;
-    int state;
-    unsigned int nkinds, ndomains, ndevs;
-    int i, j, k;
 
-    ddomain.ao = ao;
-    LIBXL_SLIST_INIT(&ddomain.guests);
+    while (watchdog-- > 0) {
+        rc = libxl__xs_read_checked(gc, XBT_NULL, path, &p);
+        if (rc) return rc;
 
-    rc = libxl__get_domid(gc, &domid);
-    if (rc) {
-        LOG(ERROR, "unable to get domain id");
-        goto out;
-    }
-
-    /*
-     * We use absolute paths because we want xswatch to also return
-     * absolute paths that can be parsed by libxl__parse_backend_path.
-     */
-    be_path = GCSPRINTF("/local/domain/%u/backend", domid);
-    rc = libxl__ev_xswatch_register(gc, &ddomain.watch, backend_watch_callback,
-                                    be_path);
-    if (rc) goto out;
-
-    kinds = libxl__xs_directory(gc, XBT_NULL, be_path, &nkinds);
-    if (kinds) {
-        for (i = 0; i < nkinds; i++) {
-            domains = libxl__xs_directory(gc, XBT_NULL,
-                    GCSPRINTF("%s/%s", be_path, kinds[i]), &ndomains);
-            if (!domains)
-                continue;
-            for (j = 0; j < ndomains; j++) {
-                devs = libxl__xs_directory(gc, XBT_NULL,
-                        GCSPRINTF("%s/%s/%s", be_path, kinds[i], domains[j]), &ndevs);
-                if (!devs)
-                    continue;
-                for (k = 0; k < ndevs; k++) {
-                    state_path = GCSPRINTF("%s/%s/%s/%s/state",
-                            be_path, kinds[i], domains[j], devs[k]);
-                    rc = libxl__xs_read_checked(gc, XBT_NULL, state_path, &sstate);
-                    if (rc || !sstate)
-                        continue;
-                    state = atoi(sstate);
-                    if (state == XenbusStateInitWait)
-                        backend_watch_callback(egc, &ddomain.watch,
-                                               be_path, state_path);
-                }
-            }
+        if (p == NULL) {
+            LOG(ERROR, "Backend %s does not exist", be_path);
+            return ERROR_FAIL;
         }
+
+        usleep(100000);
+
+        if (!strcmp(p, state))
+            return 0;
     }
 
-    return AO_INPROGRESS;
-
-out:
-    return AO_CREATE_FAIL(rc);
+    LOG(ERROR, "Backend %s not ready", be_path);
+    return ERROR_FAIL;
 }
 
 /*

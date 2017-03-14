@@ -24,6 +24,7 @@
  * IN THE SOFTWARE.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/event.h>
 #include <xen/lib.h>
@@ -376,9 +377,6 @@ static int vpic_save(struct domain *d, hvm_domain_context_t *h)
     struct hvm_hw_vpic *s;
     int i;
 
-    if ( !has_vpic(d) )
-        return 0;
-
     /* Save the state of both PICs */
     for ( i = 0; i < 2 ; i++ )
     {
@@ -394,10 +392,7 @@ static int vpic_load(struct domain *d, hvm_domain_context_t *h)
 {
     struct hvm_hw_vpic *s;
     uint16_t inst;
-
-    if ( !has_vpic(d) )
-        return -ENODEV;
-
+    
     /* Which PIC is this? */
     inst = hvm_load_instance(h);
     if ( inst > 1 )
@@ -417,9 +412,6 @@ void vpic_reset(struct domain *d)
 {
     struct hvm_hw_vpic *vpic;
 
-    if ( !has_vpic(d) )
-        return;
-
     /* Master PIC. */
     vpic = &d->arch.hvm_domain.vpic[0];
     memset(vpic, 0, sizeof(*vpic));
@@ -433,9 +425,6 @@ void vpic_reset(struct domain *d)
 
 void vpic_init(struct domain *d)
 {
-    if ( !has_vpic(d) )
-        return;
-
     vpic_reset(d);
 
     register_portio_handler(d, 0x20, 2, vpic_intercept_pic_io);
@@ -450,7 +439,6 @@ void vpic_irq_positive_edge(struct domain *d, int irq)
     struct hvm_hw_vpic *vpic = &d->arch.hvm_domain.vpic[irq >> 3];
     uint8_t mask = 1 << (irq & 7);
 
-    ASSERT(has_vpic(d));
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
@@ -468,7 +456,6 @@ void vpic_irq_negative_edge(struct domain *d, int irq)
     struct hvm_hw_vpic *vpic = &d->arch.hvm_domain.vpic[irq >> 3];
     uint8_t mask = 1 << (irq & 7);
 
-    ASSERT(has_vpic(d));
     ASSERT(irq <= 15);
     ASSERT(vpic_is_locked(vpic));
 
@@ -485,8 +472,6 @@ int vpic_ack_pending_irq(struct vcpu *v)
 {
     int irq, vector;
     struct hvm_hw_vpic *vpic = &v->domain->arch.hvm_domain.vpic[0];
-
-    ASSERT(has_vpic(v->domain));
 
     TRACE_2D(TRC_HVM_EMUL_PIC_PEND_IRQ_CALL, vlapic_accept_pic_intr(v),
              vpic->int_output);

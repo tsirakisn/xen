@@ -8,7 +8,7 @@ void compat_show_guest_stack(struct vcpu *v, const struct cpu_user_regs *regs,
 {
     unsigned int i, *stack, addr, mask = STACK_SIZE;
 
-    stack = (unsigned int *)(unsigned long)regs->esp;
+    stack = (unsigned int *)(unsigned long)regs->_esp;
     printk("Guest stack trace from esp=%08lx:\n ", (unsigned long)stack);
 
     if ( !__compat_access_ok(v->domain, stack, sizeof(*stack)) )
@@ -76,34 +76,21 @@ unsigned int compat_iret(void)
     regs->rsp = (u32)regs->rsp;
 
     /* Restore EAX (clobbered by hypercall). */
-    if ( unlikely(__get_user(regs->eax, (u32 *)regs->rsp)) )
-    {
-        domain_crash(v->domain);
-        return 0;
-    }
+    if ( unlikely(__get_user(regs->_eax, (u32 *)regs->rsp)) )
+        goto exit_and_crash;
 
     /* Restore CS and EIP. */
-    if ( unlikely(__get_user(regs->eip, (u32 *)regs->rsp + 1)) ||
+    if ( unlikely(__get_user(regs->_eip, (u32 *)regs->rsp + 1)) ||
         unlikely(__get_user(regs->cs, (u32 *)regs->rsp + 2)) )
-    {
-        domain_crash(v->domain);
-        return 0;
-    }
+        goto exit_and_crash;
 
     /*
      * Fix up and restore EFLAGS. We fix up in a local staging area
      * to avoid firing the BUG_ON(IOPL) check in arch_get_info_guest.
      */
     if ( unlikely(__get_user(eflags, (u32 *)regs->rsp + 3)) )
-    {
-        domain_crash(v->domain);
-        return 0;
-    }
-
-    if ( VM_ASSIST(v->domain, architectural_iopl) )
-        v->arch.pv_vcpu.iopl = eflags & X86_EFLAGS_IOPL;
-
-    regs->eflags = (eflags & ~X86_EFLAGS_IOPL) | X86_EFLAGS_IF;
+        goto exit_and_crash;
+    regs->_eflags = (eflags & ~X86_EFLAGS_IOPL) | X86_EFLAGS_IF;
 
     if ( unlikely(eflags & X86_EFLAGS_VM) )
     {
@@ -121,8 +108,8 @@ unsigned int compat_iret(void)
         int rc = 0;
 
         gdprintk(XENLOG_ERR, "VM86 mode unavailable (ksp:%08X->%08X)\n",
-                 regs->esp, ksp);
-        if ( ksp < regs->esp )
+                 regs->_esp, ksp);
+        if ( ksp < regs->_esp )
         {
             for (i = 1; i < 10; ++i)
             {
@@ -130,7 +117,7 @@ unsigned int compat_iret(void)
                 rc |= __put_user(x, (u32 *)(unsigned long)ksp + i);
             }
         }
-        else if ( ksp > regs->esp )
+        else if ( ksp > regs->_esp )
         {
             for ( i = 9; i > 0; --i )
             {
@@ -139,40 +126,31 @@ unsigned int compat_iret(void)
             }
         }
         if ( rc )
-        {
-            domain_crash(v->domain);
-            return 0;
-        }
-        regs->esp = ksp;
+            goto exit_and_crash;
+        regs->_esp = ksp;
         regs->ss = v->arch.pv_vcpu.kernel_ss;
 
         ti = &v->arch.pv_vcpu.trap_ctxt[TRAP_gp_fault];
         if ( TI_GET_IF(ti) )
             eflags &= ~X86_EFLAGS_IF;
-        regs->eflags &= ~(X86_EFLAGS_VM|X86_EFLAGS_RF|
-                          X86_EFLAGS_NT|X86_EFLAGS_TF);
+        regs->_eflags &= ~(X86_EFLAGS_VM|X86_EFLAGS_RF|
+                           X86_EFLAGS_NT|X86_EFLAGS_TF);
         if ( unlikely(__put_user(0, (u32 *)regs->rsp)) )
-        {
-            domain_crash(v->domain);
-            return 0;
-        }
-        regs->eip = ti->address;
+            goto exit_and_crash;
+        regs->_eip = ti->address;
         regs->cs = ti->cs;
     }
     else if ( unlikely(ring_0(regs)) )
+        goto exit_and_crash;
+    else if ( !ring_1(regs) )
     {
-        domain_crash(v->domain);
-        return 0;
+        /* Return to ring 2/3: restore ESP and SS. */
+        if ( __get_user(regs->ss, (u32 *)regs->rsp + 5)
+            || __get_user(regs->_esp, (u32 *)regs->rsp + 4))
+            goto exit_and_crash;
     }
-    else if ( ring_1(regs) )
-        regs->esp += 16;
-    /* Return to ring 2/3: restore ESP and SS. */
-    else if ( __get_user(regs->ss, (u32 *)regs->rsp + 5) ||
-              __get_user(regs->esp, (u32 *)regs->rsp + 4) )
-    {
-        domain_crash(v->domain);
-        return 0;
-    }
+    else
+        regs->_esp += 16;
 
     /* Restore upcall mask from supplied EFLAGS.IF. */
     vcpu_info(v, evtchn_upcall_mask) = !(eflags & X86_EFLAGS_IF);
@@ -183,7 +161,12 @@ unsigned int compat_iret(void)
      * The hypercall exit path will overwrite EAX with this return
      * value.
      */
-    return regs->eax;
+    return regs->_eax;
+
+ exit_and_crash:
+    gprintk(XENLOG_ERR, "Fatal IRET error\n");
+    domain_crash(v->domain);
+    return 0;
 }
 
 static long compat_register_guest_callback(
@@ -328,6 +311,8 @@ long compat_set_callbacks(unsigned long event_selector,
 
     return 0;
 }
+
+DEFINE_XEN_GUEST_HANDLE(trap_info_compat_t);
 
 int compat_set_trap_table(XEN_GUEST_HANDLE(trap_info_compat_t) traps)
 {

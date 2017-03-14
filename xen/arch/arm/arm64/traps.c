@@ -16,6 +16,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 
 #include <asm/system.h>

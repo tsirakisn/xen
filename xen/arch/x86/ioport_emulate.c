@@ -4,6 +4,7 @@
  * Handle I/O port access quirks of various platforms.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/sched.h>
 #include <xen/dmi.h>
@@ -11,8 +12,8 @@
 static void ioemul_handle_proliant_quirk(
     u8 opcode, char *io_emul_stub, struct cpu_user_regs *regs)
 {
-    uint16_t port = regs->dx;
-    uint8_t value = regs->al;
+    uint16_t port = regs->edx;
+    uint8_t value = regs->eax;
 
     if ( (opcode != 0xee) || (port != 0xcd4) || !(value & 0x80) )
         return;

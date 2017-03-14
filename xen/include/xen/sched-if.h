@@ -47,17 +47,6 @@ DECLARE_PER_CPU(struct schedule_data, schedule_data);
 DECLARE_PER_CPU(struct scheduler *, scheduler);
 DECLARE_PER_CPU(struct cpupool *, cpupool);
 
-/*
- * Scratch space, for avoiding having too many cpumask_t on the stack.
- * Within each scheduler, when using the scratch mask of one pCPU:
- * - the pCPU must belong to the scheduler,
- * - the caller must own the per-pCPU scheduler lock (a.k.a. runqueue
- *   lock).
- */
-DECLARE_PER_CPU(cpumask_t, cpumask_scratch);
-#define cpumask_scratch        (&this_cpu(cpumask_scratch))
-#define cpumask_scratch_cpu(c) (&per_cpu(cpumask_scratch, c))
-
 #define sched_lock(kind, param, cpu, irq, arg...) \
 static inline spinlock_t *kind##_schedule_lock##irq(param EXTRA_TYPE(arg)) \
 { \
@@ -137,20 +126,15 @@ struct scheduler {
     int          (*global_init)    (void);
 
     int          (*init)           (struct scheduler *);
-    void         (*deinit)         (struct scheduler *);
+    void         (*deinit)         (const struct scheduler *);
 
     void         (*free_vdata)     (const struct scheduler *, void *);
     void *       (*alloc_vdata)    (const struct scheduler *, struct vcpu *,
                                     void *);
     void         (*free_pdata)     (const struct scheduler *, void *, int);
     void *       (*alloc_pdata)    (const struct scheduler *, int);
-    void         (*init_pdata)     (const struct scheduler *, void *, int);
-    void         (*deinit_pdata)   (const struct scheduler *, void *, int);
     void         (*free_domdata)   (const struct scheduler *, void *);
     void *       (*alloc_domdata)  (const struct scheduler *, struct domain *);
-
-    void         (*switch_sched)   (struct scheduler *, unsigned int,
-                                    void *, void *);
 
     int          (*init_domain)    (const struct scheduler *, struct domain *);
     void         (*destroy_domain) (const struct scheduler *, struct domain *);
@@ -181,8 +165,11 @@ struct scheduler {
     void         (*tick_resume)     (const struct scheduler *, unsigned int);
 };
 
-#define REGISTER_SCHEDULER(x) static const struct scheduler *x##_entry \
-  __used_section(".data.schedulers") = &x;
+extern const struct scheduler sched_credit_def;
+extern const struct scheduler sched_credit2_def;
+extern const struct scheduler sched_arinc653_def;
+extern const struct scheduler sched_rtds_def;
+
 
 struct cpupool
 {
@@ -195,17 +182,9 @@ struct cpupool
     atomic_t         refcnt;
 };
 
+#define cpupool_scheduler_cpumask(_pool) \
+    (((_pool) == NULL) ? &cpupool_free_cpus : (_pool)->cpu_valid)
 #define cpupool_online_cpumask(_pool) \
     (((_pool) == NULL) ? &cpu_online_map : (_pool)->cpu_valid)
-
-static inline cpumask_t* cpupool_domain_cpumask(struct domain *d)
-{
-    /*
-     * d->cpupool is NULL only for the idle domain, and no one should
-     * be interested in calling this for the idle domain.
-     */
-    ASSERT(d->cpupool != NULL);
-    return d->cpupool->cpu_valid;
-}
 
 #endif /* __XEN_SCHED_IF_H__ */

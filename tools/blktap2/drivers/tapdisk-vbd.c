@@ -49,18 +49,18 @@
 #define DBG(_level, _f, _a...) tlog_write(_level, _f, ##_a)
 #define ERR(_err, _f, _a...) tlog_error(_err, _f, ##_a)
 
-#if 1
+#if 1                                                                        
 #define ASSERT(p)							\
 	do {								\
 		if (!(p)) {						\
 			DPRINTF("Assertion '%s' failed, line %d, "	\
 				"file %s", #p, __LINE__, __FILE__);	\
-			abort();					\
+			*(int*)0 = 0;					\
 		}							\
 	} while (0)
 #else
 #define ASSERT(p) ((void)0)
-#endif
+#endif 
 
 
 #define TD_VBD_EIO_RETRIES          10
@@ -441,6 +441,20 @@ fail:
 	return err;
 }
 
+static void
+free_driver_stack(td_vbd_t *vbd)
+{
+	td_vbd_driver_info_t *driver;
+
+	while(!list_empty(&vbd->driver_stack)) {
+		driver = list_entry(vbd->driver_stack.next,
+		    td_vbd_driver_info_t, next);
+		list_del(&driver->next);
+		free(driver->params);
+		free(driver);
+	}
+}
+
 /* this populates a vbd type based on path */
 int
 tapdisk_vbd_parse_stack(td_vbd_t *vbd, const char *path)
@@ -516,7 +530,7 @@ tapdisk_vbd_free_stack(td_vbd_t *vbd)
 int
 tapdisk_vbd_open_stack(td_vbd_t *vbd, uint16_t storage, td_flag_t flags)
 {
-	int i, err = 0;
+	int i, err;
 
 	vbd->flags   = flags;
 	vbd->storage = storage;
@@ -932,7 +946,7 @@ tapdisk_vbd_open_image(td_vbd_t *vbd, td_image_t *image)
 static int
 tapdisk_vbd_close_and_reopen_image(td_vbd_t *vbd, td_image_t *image)
 {
-	int i, err = 0;
+	int i, err;
 
 	td_close(image);
 
@@ -972,7 +986,7 @@ tapdisk_vbd_pause(td_vbd_t *vbd)
 int
 tapdisk_vbd_resume(td_vbd_t *vbd, const char *path, uint16_t drivertype)
 {
-	int i, err = 0;
+	int i, err;
 
 	if (!td_flag_test(vbd->state, TD_VBD_PAUSED)) {
 		EPRINTF("resume request for unpaused vbd %s\n", vbd->name);
@@ -1163,12 +1177,25 @@ tapdisk_vbd_check_queue(td_vbd_t *vbd)
 	return 0;
 }
 
+static int
+tapdisk_vbd_request_should_retry(td_vbd_request_t *vreq)
+{
+	switch (vreq->error) {
+	case -EPERM:
+	case -ENOSYS:
+		return 0;
+	default:
+		return 1;
+	}
+}
+
 void
 tapdisk_vbd_complete_vbd_request(td_vbd_t *vbd, td_vbd_request_t *vreq)
 {
 	if (!vreq->submitting && !vreq->secs_pending) {
 		if (vreq->status == BLKIF_RSP_ERROR &&
 		    vreq->num_retries < TD_VBD_MAX_RETRIES &&
+		    tapdisk_vbd_request_should_retry(vreq) &&
 		    !td_flag_test(vbd->state, TD_VBD_DEAD) &&
 		    !td_flag_test(vbd->state, TD_VBD_SHUTDOWN_REQUESTED))
 			tapdisk_vbd_move_request(vreq, &vbd->failed_requests);
@@ -1376,13 +1403,17 @@ tapdisk_vbd_issue_request(td_vbd_t *vbd, td_vbd_request_t *vreq)
 
 #if 0
 	err = tapdisk_vbd_check_queue(vbd);
-	if (err)
+	if (err) {
+		vreq->error = err;
 		goto fail;
+	}
 #endif
 
 	err = tapdisk_image_check_ring_request(image, req);
-	if (err)
+	if (err) {
+		vreq->error = err;
 		goto fail;
+	}
 
 	for (i = 0; i < req->nr_segments; i++) {
 		nsects = req->seg[i].last_sect - req->seg[i].first_sect + 1;
@@ -1645,6 +1676,14 @@ tapdisk_vbd_resume_ring(td_vbd_t *vbd)
 	if (!vbd->name) {
 		EPRINTF("resume malloc failed\n");
 		err = -ENOMEM;
+		goto out;
+	}
+
+	/* re-create the driver stack as the path may have changed */
+	free_driver_stack(vbd);
+	err = tapdisk_vbd_parse_stack(vbd, message);
+	if (err) {
+		err = -EINVAL;
 		goto out;
 	}
 

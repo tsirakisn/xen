@@ -67,7 +67,6 @@ get_memory_map:
 
         ret
 
-        .align  4
 GLOBAL(e820map)
         .fill   E820MAX*20,1,0
 GLOBAL(e820nr)

@@ -4,6 +4,7 @@
  * x86-specific shutdown handling.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
@@ -79,9 +80,6 @@ static void __init set_reboot_type(char *str)
             break;
         str++;
     }
-
-    if ( reboot_type == BOOT_EFI && !efi_enabled(EFI_RS) )
-        reboot_type = BOOT_INVALID;
 }
 custom_param("reboot", set_reboot_type);
 
@@ -118,7 +116,7 @@ void machine_halt(void)
 static void default_reboot_type(void)
 {
     if ( reboot_type == BOOT_INVALID )
-        reboot_type = efi_enabled(EFI_RS) ? BOOT_EFI
+        reboot_type = efi_enabled ? BOOT_EFI
                                   : acpi_disabled ? BOOT_KBD
                                                   : BOOT_ACPI;
 }
@@ -127,15 +125,11 @@ static int __init override_reboot(struct dmi_system_id *d)
 {
     enum reboot_type type = (long)d->driver_data;
 
-    if ( type == BOOT_ACPI && acpi_disabled )
-        type = BOOT_KBD;
-
     if ( reboot_type != type )
     {
         static const char *__initdata msg[] =
         {
             [BOOT_KBD]  = "keyboard controller",
-            [BOOT_ACPI] = "ACPI",
             [BOOT_CF9]  = "PCI",
         };
 
@@ -441,15 +435,6 @@ static struct dmi_system_id __initdata reboot_dmi_table[] = {
             DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 390"),
         },
     },
-    {    /* Handle problems with rebooting on Dell OptiPlex 9020. */
-        .callback = override_reboot,
-        .driver_data = (void *)(long)BOOT_ACPI,
-        .ident = "Dell OptiPlex 9020",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Dell Inc."),
-            DMI_MATCH(DMI_PRODUCT_NAME, "OptiPlex 9020"),
-        },
-    },
     {    /* Handle problems with rebooting on the Latitude E6320. */
         .callback = override_reboot,
         .driver_data = (void *)(long)BOOT_CF9,
@@ -556,7 +541,6 @@ void machine_restart(unsigned int delay_millisecs)
         {
         case BOOT_INVALID:
             ASSERT_UNREACHABLE();
-            /* fall through */
         case BOOT_KBD:
             /* Pulse the keyboard reset line. */
             for ( i = 0; i < 100; i++ )

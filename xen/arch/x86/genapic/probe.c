@@ -3,6 +3,7 @@
  * 
  * Generic x86 APIC driver probe layer.
  */  
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <xen/string.h>
 #include <xen/kernel.h>
@@ -55,8 +56,7 @@ custom_param("apic", genapic_apic_force);
 
 void __init generic_apic_probe(void) 
 { 
-	bool changed;
-	int i;
+	int i, changed;
 
 	record_boot_APIC_mode();
 

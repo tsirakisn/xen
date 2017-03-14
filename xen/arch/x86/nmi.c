@@ -13,6 +13,7 @@
  *  Mikael Pettersson : PM converted to driver model. Disable/enable API.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/mm.h>
@@ -138,18 +139,7 @@ int nmi_active;
 
 static void __init wait_for_nmis(void *p)
 {
-    unsigned int cpu = smp_processor_id();
-    unsigned int start_count = nmi_count(cpu);
-    unsigned long ticks = 10 * 1000 * cpu_khz / nmi_hz;
-    unsigned long s, e;
-
-    s = rdtsc();
-    do {
-        cpu_relax();
-        if ( nmi_count(cpu) >= start_count + 2 )
-            break;
-        e = rdtsc();
-    } while( e - s < ticks );
+    mdelay((10*1000)/nmi_hz); /* wait 10 ticks */
 }
 
 int __init check_nmi_watchdog (void)
@@ -166,16 +156,15 @@ int __init check_nmi_watchdog (void)
     for_each_online_cpu ( cpu )
         prev_nmi_count[cpu] = nmi_count(cpu);
 
-    /*
-     * Wait at most 10 ticks for 2 watchdog NMIs on each CPU.
-     * Busy-wait on all CPUs: the LAPIC counter that the NMI watchdog
-     * uses only runs while the core's not halted
-     */
-    on_selected_cpus(&cpu_online_map, wait_for_nmis, NULL, 1);
+    /* Wait for 10 ticks.  Busy-wait on all CPUs: the LAPIC counter that
+     * the NMI watchdog uses only runs while the core's not halted */
+    if ( nmi_watchdog == NMI_LOCAL_APIC )
+        smp_call_function(wait_for_nmis, NULL, 0);
+    wait_for_nmis(NULL);
 
     for_each_online_cpu ( cpu )
     {
-        if ( nmi_count(cpu) - prev_nmi_count[cpu] < 2 )
+        if ( nmi_count(cpu) - prev_nmi_count[cpu] <= 5 )
         {
             printk(" %d", cpu);
             ok = 0;
@@ -265,12 +254,14 @@ void release_lapic_nmi(void)
         enable_lapic_nmi_watchdog();
 }
 
+#define __pminit __devinit
+
 /*
  * Activate the NMI watchdog via the local APIC.
  * Original code written by Keith Owens.
  */
 
-static void clear_msr_range(unsigned int base, unsigned int n)
+static void __pminit clear_msr_range(unsigned int base, unsigned int n)
 {
     unsigned int i;
 
@@ -288,7 +279,7 @@ static inline void write_watchdog_counter(const char *descr)
     wrmsrl(nmi_perfctr_msr, 0 - count);
 }
 
-static void setup_k7_watchdog(void)
+static void __pminit setup_k7_watchdog(void)
 {
     unsigned int evntsel;
 
@@ -309,7 +300,7 @@ static void setup_k7_watchdog(void)
     wrmsr(MSR_K7_EVNTSEL0, evntsel, 0);
 }
 
-static void setup_p6_watchdog(unsigned counter)
+static void __pminit setup_p6_watchdog(unsigned counter)
 {
     unsigned int evntsel;
 
@@ -330,7 +321,7 @@ static void setup_p6_watchdog(unsigned counter)
     wrmsr(MSR_P6_EVNTSEL(0), evntsel, 0);
 }
 
-static int setup_p4_watchdog(void)
+static int __pminit setup_p4_watchdog(void)
 {
     uint64_t misc_enable;
 
@@ -368,7 +359,7 @@ static int setup_p4_watchdog(void)
     return 1;
 }
 
-void setup_apic_nmi_watchdog(void)
+void __pminit setup_apic_nmi_watchdog(void)
 {
     if ( nmi_watchdog == NMI_NONE )
         return;
@@ -487,7 +478,7 @@ bool_t nmi_watchdog_tick(const struct cpu_user_regs *regs)
             console_force_unlock();
             printk("Watchdog timer detects that CPU%d is stuck!\n",
                    smp_processor_id());
-            fatal_trap(regs, 1);
+            fatal_trap(regs);
         }
     } 
     else 
@@ -563,6 +554,11 @@ static void do_nmi_trigger(unsigned char key)
     self_nmi();
 }
 
+static struct keyhandler nmi_trigger_keyhandler = {
+    .u.fn = do_nmi_trigger,
+    .desc = "trigger an NMI"
+};
+
 static void do_nmi_stats(unsigned char key)
 {
     int i;
@@ -586,10 +582,16 @@ static void do_nmi_stats(unsigned char key)
         printk("dom0 vcpu0: NMI neither pending nor masked\n");
 }
 
+static struct keyhandler nmi_stats_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = do_nmi_stats,
+    .desc = "NMI statistics"
+};
+
 static __init int register_nmi_trigger(void)
 {
-    register_keyhandler('N', do_nmi_trigger, "trigger an NMI", 0);
-    register_keyhandler('n', do_nmi_stats, "NMI statistics", 1);
+    register_keyhandler('N', &nmi_trigger_keyhandler);
+    register_keyhandler('n', &nmi_stats_keyhandler);
     return 0;
 }
 __initcall(register_nmi_trigger);

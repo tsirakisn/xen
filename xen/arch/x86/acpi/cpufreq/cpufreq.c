@@ -50,6 +50,7 @@ enum {
 };
 
 #define INTEL_MSR_RANGE         (0xffffull)
+#define CPUID_6_ECX_APERFMPERF_CAPABILITY       (0x1)
 
 struct acpi_cpufreq_data *cpufreq_drv_data[NR_CPUS];
 
@@ -63,7 +64,7 @@ static int check_est_cpu(unsigned int cpuid)
     struct cpuinfo_x86 *cpu = &cpu_data[cpuid];
 
     if (cpu->x86_vendor != X86_VENDOR_INTEL ||
-        !cpu_has(cpu, X86_FEATURE_EIST))
+        !cpu_has(cpu, X86_FEATURE_EST))
         return 0;
 
     return 1;
@@ -350,10 +351,10 @@ static unsigned int get_cur_freq_on_cpu(unsigned int cpu)
 static void feature_detect(void *info)
 {
     struct cpufreq_policy *policy = info;
-    unsigned int eax;
+    unsigned int eax, ecx;
 
-    if ( cpu_has_aperfmperf )
-    {
+    ecx = cpuid_ecx(6);
+    if (ecx & CPUID_6_ECX_APERFMPERF_CAPABILITY) {
         policy->aperf_mperf = 1;
         acpi_cpufreq_driver.getavg = get_measured_perf;
     }

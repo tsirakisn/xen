@@ -26,9 +26,10 @@
 #include <xen/event.h>
 #include <xen/trace.h>
 
-#define domain_vhpet(x) (&(x)->arch.hvm_domain.pl_time->vhpet)
+#define domain_vhpet(x) (&(x)->arch.hvm_domain.pl_time.vhpet)
 #define vcpu_vhpet(x)   (domain_vhpet((x)->domain))
-#define vhpet_domain(x) (container_of(x, struct pl_time, vhpet)->domain)
+#define vhpet_domain(x) (container_of((x), struct domain, \
+                                      arch.hvm_domain.pl_time.vhpet))
 #define vhpet_vcpu(x)   (pt_global_vcpu_target(vhpet_domain(x)))
 
 #define HPET_BASE_ADDRESS   0xfed00000ULL
@@ -516,9 +517,6 @@ static int hpet_save(struct domain *d, hvm_domain_context_t *h)
     int rc;
     uint64_t guest_time;
 
-    if ( !has_vhpet(d) )
-        return 0;
-
     write_lock(&hp->lock);
     guest_time = (v->arch.hvm_vcpu.guest_time ?: hvm_get_guest_time(v)) /
                  STIME_PER_HPET_TICK;
@@ -579,9 +577,6 @@ static int hpet_load(struct domain *d, hvm_domain_context_t *h)
     uint64_t guest_time;
     int i;
 
-    if ( !has_vhpet(d) )
-        return -ENODEV;
-
     write_lock(&hp->lock);
 
     /* Reload the HPET registers */
@@ -640,9 +635,6 @@ void hpet_init(struct domain *d)
     HPETState *h = domain_vhpet(d);
     int i;
 
-    if ( !has_vhpet(d) )
-        return;
-
     memset(h, 0, sizeof(HPETState));
 
     rwlock_init(&h->lock);
@@ -670,16 +662,12 @@ void hpet_init(struct domain *d)
     }
 
     register_mmio_handler(d, &hpet_mmio_ops);
-    d->arch.hvm_domain.params[HVM_PARAM_HPET_ENABLED] = 1;
 }
 
 void hpet_deinit(struct domain *d)
 {
     int i;
     HPETState *h = domain_vhpet(d);
-
-    if ( !has_vhpet(d) )
-        return;
 
     write_lock(&h->lock);
 

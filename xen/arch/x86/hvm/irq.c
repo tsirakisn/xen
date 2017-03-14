@@ -18,6 +18,7 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/event.h>
 #include <xen/sched.h>
@@ -228,14 +229,13 @@ void hvm_assert_evtchn_irq(struct vcpu *v)
         hvm_set_callback_irq_level(v);
 }
 
-int hvm_set_pci_link_route(struct domain *d, u8 link, u8 isa_irq)
+void hvm_set_pci_link_route(struct domain *d, u8 link, u8 isa_irq)
 {
     struct hvm_irq *hvm_irq = &d->arch.hvm_domain.irq;
     u8 old_isa_irq;
     int i;
 
-    if ( (link > 3) || (isa_irq > 15) )
-        return -EINVAL;
+    ASSERT((link <= 3) && (isa_irq <= 15));
 
     spin_lock(&d->arch.hvm_domain.irq_lock);
 
@@ -273,8 +273,6 @@ int hvm_set_pci_link_route(struct domain *d, u8 link, u8 isa_irq)
 
     dprintk(XENLOG_G_INFO, "Dom%u PCI link %u changed %u -> %u\n",
             d->domain_id, link, old_isa_irq, isa_irq);
-
-    return 0;
 }
 
 int hvm_inject_msi(struct domain *d, uint64_t addr, uint32_t data)
@@ -327,14 +325,10 @@ void hvm_set_callback_via(struct domain *d, uint64_t via)
     unsigned int gsi=0, pdev=0, pintx=0;
     uint8_t via_type;
 
-    via_type = (uint8_t)MASK_EXTR(via, HVM_PARAM_CALLBACK_IRQ_TYPE_MASK) + 1;
+    via_type = (uint8_t)(via >> 56) + 1;
     if ( ((via_type == HVMIRQ_callback_gsi) && (via == 0)) ||
          (via_type > HVMIRQ_callback_vector) )
         via_type = HVMIRQ_callback_none;
-
-    if ( via_type != HVMIRQ_callback_vector &&
-         (!has_vlapic(d) || !has_vioapic(d) || !has_vpic(d)) )
-        return;
 
     spin_lock(&d->arch.hvm_domain.irq_lock);
 
@@ -535,9 +529,15 @@ static void dump_irq_info(unsigned char key)
     rcu_read_unlock(&domlist_read_lock);
 }
 
+static struct keyhandler dump_irq_info_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_irq_info,
+    .desc = "dump HVM irq info"
+};
+
 static int __init dump_irq_info_key_init(void)
 {
-    register_keyhandler('I', dump_irq_info, "dump HVM irq info", 1);
+    register_keyhandler('I', &dump_irq_info_keyhandler);
     return 0;
 }
 __initcall(dump_irq_info_key_init);

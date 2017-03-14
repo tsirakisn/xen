@@ -23,11 +23,8 @@ DEFINE_XEN_GUEST_HANDLE(xsm_op_t);
 
 /* policy magic number (defined by XSM_MAGIC) */
 typedef u32 xsm_magic_t;
-
-#ifdef CONFIG_FLASK
-#define XSM_MAGIC 0xf97cff8c
-#else
-#define XSM_MAGIC 0x0
+#ifndef XSM_MAGIC
+#define XSM_MAGIC 0x00000000
 #endif
 
 /* These annotations are used by callers and in dummy.h to document the
@@ -38,10 +35,20 @@ enum xsm_default {
     XSM_DM_PRIV,  /* Device model can perform on its target domain */
     XSM_TARGET,   /* Can perform on self or your target domain */
     XSM_PRIV,     /* Privileged - normally restricted to dom0 */
-    XSM_XS_PRIV,  /* Xenstore domain - can do some privileged operations */
     XSM_OTHER     /* Something more complex */
 };
 typedef enum xsm_default xsm_default_t;
+
+extern char *policy_buffer;
+extern u32 policy_size;
+
+typedef void (*xsm_initcall_t)(void);
+
+extern xsm_initcall_t __xsm_initcall_start[], __xsm_initcall_end[];
+
+#define xsm_initcall(fn) \
+    static xsm_initcall_t __initcall_##fn \
+    __used_section(".xsm_initcall.init") = fn
 
 struct xsm_operations {
     void (*security_domaininfo) (struct domain *d,
@@ -87,6 +94,7 @@ struct xsm_operations {
     int (*remove_from_physmap) (struct domain *d1, struct domain *d2);
     int (*map_gmfn_foreign) (struct domain *d, struct domain *t);
     int (*claim_pages) (struct domain *d);
+    int (*memory_translate) (struct domain *d);
 
     int (*console_io) (struct domain *d, int cmd);
 
@@ -107,14 +115,14 @@ struct xsm_operations {
     int (*iomem_mapping) (struct domain *d, uint64_t s, uint64_t e, uint8_t allow);
     int (*pci_config_permission) (struct domain *d, uint32_t machine_bdf, uint16_t start, uint16_t end, uint8_t access);
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_PCI)
     int (*get_device_group) (uint32_t machine_bdf);
     int (*test_assign_device) (uint32_t machine_bdf);
     int (*assign_device) (struct domain *d, uint32_t machine_bdf);
     int (*deassign_device) (struct domain *d, uint32_t machine_bdf);
 #endif
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_DEVICE_TREE)
     int (*test_assign_dtdevice) (const char *dtpath);
     int (*assign_dtdevice) (struct domain *d, const char *dtpath);
     int (*deassign_dtdevice) (struct domain *d, const char *dtpath);
@@ -145,26 +153,30 @@ struct xsm_operations {
 
     int (*vm_event_control) (struct domain *d, int mode, int op);
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef HAS_MEM_ACCESS
     int (*mem_access) (struct domain *d);
 #endif
 
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef HAS_MEM_PAGING
     int (*mem_paging) (struct domain *d);
 #endif
 
-#ifdef CONFIG_HAS_MEM_SHARING
+#ifdef HAS_MEM_SHARING
     int (*mem_sharing) (struct domain *d);
 #endif
-
-    int (*platform_op) (uint32_t cmd);
 
 #ifdef CONFIG_X86
     int (*do_mca) (void);
     int (*shadow_control) (struct domain *d, uint32_t op);
+    int (*hvm_set_pci_intx_level) (struct domain *d);
+    int (*hvm_set_isa_irq_level) (struct domain *d);
+    int (*hvm_set_pci_link_route) (struct domain *d);
+    int (*hvm_inject_msi) (struct domain *d);
+    int (*hvm_ioreq_server) (struct domain *d, int op);
     int (*mem_sharing_op) (struct domain *d, struct domain *cd, int op);
     int (*apic) (struct domain *d, int cmd);
     int (*memtype) (uint32_t access);
+    int (*platform_op) (uint32_t cmd);
     int (*machine_memory_map) (void);
     int (*domain_memory_map) (struct domain *d);
 #define XSM_MMU_UPDATE_READ      1
@@ -179,12 +191,12 @@ struct xsm_operations {
     int (*ioport_permission) (struct domain *d, uint32_t s, uint32_t e, uint8_t allow);
     int (*ioport_mapping) (struct domain *d, uint32_t s, uint32_t e, uint8_t allow);
     int (*pmu_op) (struct domain *d, unsigned int op);
-    int (*dm_op) (struct domain *d);
 #endif
-    int (*xen_version) (uint32_t cmd);
+    int (*v4v_send) (struct domain *dom1, struct domain *dom2);
+    int (*v4v_use) (struct domain *d);
 };
 
-#ifdef CONFIG_XSM
+#ifdef XSM_ENABLE
 
 extern struct xsm_operations *xsm_ops;
 
@@ -382,6 +394,11 @@ static inline int xsm_claim_pages(xsm_default_t def, struct domain *d)
     return xsm_ops->claim_pages(d);
 }
 
+static inline int xsm_memory_translate(xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->memory_translate(d);
+}
+
 static inline int xsm_console_io (xsm_default_t def, struct domain *d, int cmd)
 {
     return xsm_ops->console_io(d, cmd);
@@ -459,7 +476,7 @@ static inline int xsm_pci_config_permission (xsm_default_t def, struct domain *d
     return xsm_ops->pci_config_permission(d, machine_bdf, start, end, access);
 }
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_PCI)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_PCI)
 static inline int xsm_get_device_group(xsm_default_t def, uint32_t machine_bdf)
 {
     return xsm_ops->get_device_group(machine_bdf);
@@ -481,7 +498,7 @@ static inline int xsm_deassign_device(xsm_default_t def, struct domain *d, uint3
 }
 #endif /* HAS_PASSTHROUGH && HAS_PCI) */
 
-#if defined(CONFIG_HAS_PASSTHROUGH) && defined(CONFIG_HAS_DEVICE_TREE)
+#if defined(HAS_PASSTHROUGH) && defined(HAS_DEVICE_TREE)
 static inline int xsm_assign_dtdevice(xsm_default_t def, struct domain *d,
                                       const char *dtpath)
 {
@@ -594,31 +611,26 @@ static inline int xsm_vm_event_control (xsm_default_t def, struct domain *d, int
     return xsm_ops->vm_event_control(d, mode, op);
 }
 
-#ifdef CONFIG_HAS_MEM_ACCESS
+#ifdef HAS_MEM_ACCESS
 static inline int xsm_mem_access (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_access(d);
 }
 #endif
 
-#ifdef CONFIG_HAS_MEM_PAGING
+#ifdef HAS_MEM_PAGING
 static inline int xsm_mem_paging (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_paging(d);
 }
 #endif
 
-#ifdef CONFIG_HAS_MEM_SHARING
+#ifdef HAS_MEM_SHARING
 static inline int xsm_mem_sharing (xsm_default_t def, struct domain *d)
 {
     return xsm_ops->mem_sharing(d);
 }
 #endif
-
-static inline int xsm_platform_op (xsm_default_t def, uint32_t op)
-{
-    return xsm_ops->platform_op(op);
-}
 
 #ifdef CONFIG_X86
 static inline int xsm_do_mca(xsm_default_t def)
@@ -629,6 +641,31 @@ static inline int xsm_do_mca(xsm_default_t def)
 static inline int xsm_shadow_control (xsm_default_t def, struct domain *d, uint32_t op)
 {
     return xsm_ops->shadow_control(d, op);
+}
+
+static inline int xsm_hvm_set_pci_intx_level (xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->hvm_set_pci_intx_level(d);
+}
+
+static inline int xsm_hvm_set_isa_irq_level (xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->hvm_set_isa_irq_level(d);
+}
+
+static inline int xsm_hvm_set_pci_link_route (xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->hvm_set_pci_link_route(d);
+}
+
+static inline int xsm_hvm_inject_msi (xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->hvm_inject_msi(d);
+}
+
+static inline int xsm_hvm_ioreq_server (xsm_default_t def, struct domain *d, int op)
+{
+    return xsm_ops->hvm_ioreq_server(d, op);
 }
 
 static inline int xsm_mem_sharing_op (xsm_default_t def, struct domain *d, struct domain *cd, int op)
@@ -644,6 +681,11 @@ static inline int xsm_apic (xsm_default_t def, struct domain *d, int cmd)
 static inline int xsm_memtype (xsm_default_t def, uint32_t access)
 {
     return xsm_ops->memtype(access);
+}
+
+static inline int xsm_platform_op (xsm_default_t def, uint32_t op)
+{
+    return xsm_ops->platform_op(op);
 }
 
 static inline int xsm_machine_memory_map(xsm_default_t def)
@@ -693,17 +735,17 @@ static inline int xsm_pmu_op (xsm_default_t def, struct domain *d, unsigned int 
     return xsm_ops->pmu_op(d, op);
 }
 
-static inline int xsm_dm_op(xsm_default_t def, struct domain *d)
+static inline int xsm_v4v_send(xsm_default_t def, struct domain *d1, struct domain *d2)
 {
-    return xsm_ops->dm_op(d);
+    return xsm_ops->v4v_send(d1,d2);
+}
+
+static inline int xsm_v4v_use(xsm_default_t def, struct domain *d)
+{
+    return xsm_ops->v4v_use(d);
 }
 
 #endif /* CONFIG_X86 */
-
-static inline int xsm_xen_version (xsm_default_t def, uint32_t op)
-{
-    return xsm_ops->xen_version(op);
-}
 
 #endif /* XSM_NO_WRAPPERS */
 
@@ -713,36 +755,21 @@ extern int xsm_multiboot_init(unsigned long *module_map,
                               void *(*bootstrap_map)(const module_t *));
 extern int xsm_multiboot_policy_init(unsigned long *module_map,
                                      const multiboot_info_t *mbi,
-                                     void *(*bootstrap_map)(const module_t *),
-                                     void **policy_buffer,
-                                     size_t *policy_size);
+                                     void *(*bootstrap_map)(const module_t *));
 #endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef HAS_DEVICE_TREE
 extern int xsm_dt_init(void);
-extern int xsm_dt_policy_init(void **policy_buffer, size_t *policy_size);
-extern bool has_xsm_magic(paddr_t);
+extern int xsm_dt_policy_init(void);
 #endif
 
 extern int register_xsm(struct xsm_operations *ops);
+extern int unregister_xsm(struct xsm_operations *ops);
 
 extern struct xsm_operations dummy_xsm_ops;
 extern void xsm_fixup_ops(struct xsm_operations *ops);
 
-#ifdef CONFIG_FLASK
-extern void flask_init(const void *policy_buffer, size_t policy_size);
-#else
-static inline void flask_init(const void *policy_buffer, size_t policy_size)
-{
-}
-#endif
-
-#ifdef CONFIG_XSM_POLICY
-extern const unsigned char xsm_init_policy[];
-extern const unsigned int xsm_init_policy_size;
-#endif
-
-#else /* CONFIG_XSM */
+#else /* XSM_ENABLE */
 
 #include <xsm/dummy.h>
 
@@ -755,18 +782,13 @@ static inline int xsm_multiboot_init (unsigned long *module_map,
 }
 #endif
 
-#ifdef CONFIG_HAS_DEVICE_TREE
+#ifdef HAS_DEVICE_TREE
 static inline int xsm_dt_init(void)
 {
     return 0;
 }
+#endif
 
-static inline bool has_xsm_magic(paddr_t start)
-{
-    return false;
-}
-#endif /* CONFIG_HAS_DEVICE_TREE */
-
-#endif /* CONFIG_XSM */
+#endif /* XSM_ENABLE */
 
 #endif /* __XSM_H */

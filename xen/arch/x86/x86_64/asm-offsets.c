@@ -5,6 +5,7 @@
  */
 #define COMPILE_OFFSETS
 
+#include <xen/config.h>
 #include <xen/perfc.h>
 #include <xen/sched.h>
 #include <xen/bitops.h>
@@ -12,7 +13,6 @@
 #include <asm/fixmap.h>
 #include <asm/hardirq.h>
 #include <xen/multiboot.h>
-#include <xen/multiboot2.h>
 
 #define DEFINE(_sym, _val)                                                 \
     asm volatile ("\n.ascii\"==>#define " #_sym " %0 /* " #_val " */<==\"" \
@@ -44,7 +44,7 @@ void __dummy__(void)
     OFFSET(UREGS_saved_upcall_mask, struct cpu_user_regs, saved_upcall_mask);
     OFFSET(UREGS_rip, struct cpu_user_regs, rip);
     OFFSET(UREGS_cs, struct cpu_user_regs, cs);
-    OFFSET(UREGS_eflags, struct cpu_user_regs, rflags);
+    OFFSET(UREGS_eflags, struct cpu_user_regs, eflags);
     OFFSET(UREGS_rsp, struct cpu_user_regs, rsp);
     OFFSET(UREGS_ss, struct cpu_user_regs, ss);
     OFFSET(UREGS_ds, struct cpu_user_regs, ds);
@@ -86,7 +86,6 @@ void __dummy__(void)
     OFFSET(VCPU_trap_ctxt, struct vcpu, arch.pv_vcpu.trap_ctxt);
     OFFSET(VCPU_kernel_sp, struct vcpu, arch.pv_vcpu.kernel_sp);
     OFFSET(VCPU_kernel_ss, struct vcpu, arch.pv_vcpu.kernel_ss);
-    OFFSET(VCPU_iopl, struct vcpu, arch.pv_vcpu.iopl);
     OFFSET(VCPU_guest_context_flags, struct vcpu, arch.vgc_flags);
     OFFSET(VCPU_nmi_pending, struct vcpu, nmi_pending);
     OFFSET(VCPU_mce_pending, struct vcpu, mce_pending);
@@ -152,7 +151,8 @@ void __dummy__(void)
     OFFSET(TRAPBOUNCE_eip, struct trap_bounce, eip);
     BLANK();
 
-#ifdef CONFIG_PERF_COUNTERS
+#if PERF_COUNTERS
+    DEFINE(ASM_PERFC_hypercalls, PERFC_hypercalls);
     DEFINE(ASM_PERFC_exceptions, PERFC_exceptions);
     BLANK();
 #endif
@@ -167,16 +167,4 @@ void __dummy__(void)
     OFFSET(MB_flags, multiboot_info_t, flags);
     OFFSET(MB_cmdline, multiboot_info_t, cmdline);
     OFFSET(MB_mem_lower, multiboot_info_t, mem_lower);
-    BLANK();
-
-    DEFINE(MB2_fixed_sizeof, sizeof(multiboot2_fixed_t));
-    OFFSET(MB2_fixed_total_size, multiboot2_fixed_t, total_size);
-    OFFSET(MB2_tag_type, multiboot2_tag_t, type);
-    OFFSET(MB2_tag_size, multiboot2_tag_t, size);
-    OFFSET(MB2_mem_lower, multiboot2_tag_basic_meminfo_t, mem_lower);
-    OFFSET(MB2_efi64_st, multiboot2_tag_efi64_t, pointer);
-    OFFSET(MB2_efi64_ih, multiboot2_tag_efi64_ih_t, pointer);
-    BLANK();
-
-    OFFSET(DOMAIN_vm_assist, struct domain, vm_assist);
 }

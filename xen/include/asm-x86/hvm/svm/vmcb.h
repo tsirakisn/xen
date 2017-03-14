@@ -19,6 +19,7 @@
 #ifndef __ASM_X86_HVM_SVM_VMCB_H__
 #define __ASM_X86_HVM_SVM_VMCB_H__
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <asm/hvm/emulate.h>
 
@@ -307,7 +308,7 @@ enum VMEXIT_EXITCODE
 /* Definition of segment state is borrowed by the generic HVM code. */
 typedef struct segment_register svm_segment_register_t;
 
-typedef union
+typedef union __packed
 {
     u64 bytes;
     struct 
@@ -321,7 +322,7 @@ typedef union
     } fields;
 } eventinj_t;
 
-typedef union
+typedef union __packed
 {
     u64 bytes;
     struct 
@@ -339,7 +340,7 @@ typedef union
     } fields;
 } vintr_t;
 
-typedef union
+typedef union __packed
 {
     u64 bytes;
     struct 
@@ -356,7 +357,7 @@ typedef union
     } fields;
 } ioio_info_t;
 
-typedef union
+typedef union __packed
 {
     u64 bytes;
     struct
@@ -365,7 +366,7 @@ typedef union
     } fields;
 } lbrctrl_t;
 
-typedef union
+typedef union __packed
 {
     uint32_t bytes;
     struct
@@ -400,7 +401,7 @@ typedef union
 #define IOPM_SIZE   (12 * 1024)
 #define MSRPM_SIZE  (8  * 1024)
 
-struct vmcb_struct {
+struct __packed vmcb_struct {
     u32 _cr_intercepts;         /* offset 0x00 - cleanbit 0 */
     u32 _dr_intercepts;         /* offset 0x04 - cleanbit 0 */
     u32 _exception_intercepts;  /* offset 0x08 - cleanbit 0 */
@@ -550,7 +551,7 @@ static inline void vmcb_set_##_name(struct vmcb_struct *vmcb, _type value)  \
     vmcb->_##_name = value;                                                 \
     vmcb->cleanbits.fields._cleanbit = 0;                                   \
 }                                                                           \
-static inline _type vmcb_get_##_name(const struct vmcb_struct *vmcb)        \
+static inline _type vmcb_get_##_name(struct vmcb_struct *vmcb)              \
 {                                                                           \
     return vmcb->_##_name;                                                  \
 }

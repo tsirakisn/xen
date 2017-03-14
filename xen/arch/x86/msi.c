@@ -6,6 +6,7 @@
  * Copyright (C) Tom Long Nguyen (tom.l.nguyen@intel.com)
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/irq.h>
@@ -39,6 +40,7 @@ static void __pci_disable_msix(struct msi_desc *);
 /* bitmap indicate which fixed map is free */
 static DEFINE_SPINLOCK(msix_fixmap_lock);
 static DECLARE_BITMAP(msix_fixmap_pages, FIX_MSIX_MAX_PAGES);
+static DEFINE_PER_CPU(cpumask_var_t, scratch_mask);
 
 static int msix_fixmap_alloc(void)
 {
@@ -158,37 +160,42 @@ static bool_t msix_memory_decoded(const struct pci_dev *dev, unsigned int pos)
  */
 void msi_compose_msg(unsigned vector, const cpumask_t *cpu_mask, struct msi_msg *msg)
 {
+    unsigned dest;
+
     memset(msg, 0, sizeof(*msg));
-
-    if ( vector < FIRST_DYNAMIC_VECTOR )
-        return;
-
-    if ( cpu_mask )
+    if ( !cpumask_intersects(cpu_mask, &cpu_online_map) )
     {
-        cpumask_t *mask = this_cpu(scratch_cpumask);
-
-        if ( !cpumask_intersects(cpu_mask, &cpu_online_map) )
-            return;
-
-        cpumask_and(mask, cpu_mask, &cpu_online_map);
-        msg->dest32 = cpu_mask_to_apicid(mask);
+        dprintk(XENLOG_ERR,"%s, compose msi message error!!\n", __func__);
+        return;
     }
 
-    msg->address_hi = MSI_ADDR_BASE_HI;
-    msg->address_lo = MSI_ADDR_BASE_LO |
-                      (INT_DEST_MODE ? MSI_ADDR_DESTMODE_LOGIC
-                                     : MSI_ADDR_DESTMODE_PHYS) |
-                      ((INT_DELIVERY_MODE != dest_LowestPrio)
-                       ? MSI_ADDR_REDIRECTION_CPU
-                       : MSI_ADDR_REDIRECTION_LOWPRI) |
-                      MSI_ADDR_DEST_ID(msg->dest32);
+    if ( vector )
+    {
+        cpumask_t *mask = this_cpu(scratch_mask);
 
-    msg->data = MSI_DATA_TRIGGER_EDGE |
-                MSI_DATA_LEVEL_ASSERT |
-                ((INT_DELIVERY_MODE != dest_LowestPrio)
-                 ? MSI_DATA_DELIVERY_FIXED
-                 : MSI_DATA_DELIVERY_LOWPRI) |
-                MSI_DATA_VECTOR(vector);
+        cpumask_and(mask, cpu_mask, &cpu_online_map);
+        dest = cpu_mask_to_apicid(mask);
+
+        msg->address_hi = MSI_ADDR_BASE_HI;
+        msg->address_lo =
+            MSI_ADDR_BASE_LO |
+            ((INT_DEST_MODE == 0) ?
+             MSI_ADDR_DESTMODE_PHYS:
+             MSI_ADDR_DESTMODE_LOGIC) |
+            ((INT_DELIVERY_MODE != dest_LowestPrio) ?
+             MSI_ADDR_REDIRECTION_CPU:
+             MSI_ADDR_REDIRECTION_LOWPRI) |
+            MSI_ADDR_DEST_ID(dest);
+        msg->dest32 = dest;
+
+        msg->data =
+            MSI_DATA_TRIGGER_EDGE |
+            MSI_DATA_LEVEL_ASSERT |
+            ((INT_DELIVERY_MODE != dest_LowestPrio) ?
+             MSI_DATA_DELIVERY_FIXED:
+             MSI_DATA_DELIVERY_LOWPRI) |
+            MSI_DATA_VECTOR(vector);
+    }
 }
 
 static bool_t read_msi_msg(struct msi_desc *entry, struct msi_msg *msg)
@@ -692,7 +699,7 @@ static int msi_capability_init(struct pci_dev *dev,
     u8 slot = PCI_SLOT(dev->devfn);
     u8 func = PCI_FUNC(dev->devfn);
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     pos = pci_find_cap_offset(seg, bus, slot, func, PCI_CAP_ID_MSI);
     if ( !pos )
         return -ENODEV;
@@ -850,7 +857,7 @@ static int msix_capability_init(struct pci_dev *dev,
     u8 func = PCI_FUNC(dev->devfn);
     bool_t maskall = msix->host_maskall;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     control = pci_conf_read16(seg, bus, slot, func, msix_control_reg(pos));
     /*
@@ -1040,7 +1047,7 @@ static int __pci_enable_msi(struct msi_info *msi, struct msi_desc **desc)
     struct pci_dev *pdev;
     struct msi_desc *old_desc;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     pdev = pci_get_pdev(msi->seg, msi->bus, msi->devfn);
     if ( !pdev )
         return -ENODEV;
@@ -1101,7 +1108,7 @@ static int __pci_enable_msix(struct msi_info *msi, struct msi_desc **desc)
     u8 func = PCI_FUNC(msi->devfn);
     struct msi_desc *old_desc;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
     pdev = pci_get_pdev(msi->seg, msi->bus, msi->devfn);
     pos = pci_find_cap_offset(msi->seg, msi->bus, slot, func, PCI_CAP_ID_MSIX);
     if ( !pdev || !pos )
@@ -1203,7 +1210,7 @@ int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool_t off)
     if ( !pos )
         return -ENODEV;
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = pci_get_pdev(seg, bus, devfn);
     if ( !pdev )
         rc = -ENODEV;
@@ -1222,7 +1229,7 @@ int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool_t off)
         rc = msix_capability_init(pdev, pos, NULL, NULL,
                                   multi_msix_capable(control));
     }
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     return rc;
 }
@@ -1233,7 +1240,7 @@ int pci_prepare_msix(u16 seg, u8 bus, u8 devfn, bool_t off)
  */
 int pci_enable_msi(struct msi_info *msi, struct msi_desc **desc)
 {
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     if ( !use_msi )
         return -EPERM;
@@ -1349,7 +1356,7 @@ int pci_restore_msi_state(struct pci_dev *pdev)
     unsigned int type = 0, pos = 0;
     u16 control = 0;
 
-    ASSERT(pcidevs_locked());
+    ASSERT(spin_is_locked(&pcidevs_lock));
 
     if ( !use_msi )
         return -EOPNOTSUPP;
@@ -1456,12 +1463,64 @@ int pci_restore_msi_state(struct pci_dev *pdev)
     return 0;
 }
 
+unsigned int pci_msix_get_table_len(struct pci_dev *pdev)
+{
+    int pos;
+    u16 control, seg = pdev->seg;
+    u8 bus, slot, func;
+    unsigned int len;
+
+    bus = pdev->bus;
+    slot = PCI_SLOT(pdev->devfn);
+    func = PCI_FUNC(pdev->devfn);
+
+    pos = pci_find_cap_offset(seg, bus, slot, func, PCI_CAP_ID_MSIX);
+    if ( !pos || !use_msi )
+        return 0;
+
+    control = pci_conf_read16(seg, bus, slot, func, msix_control_reg(pos));
+    len = msix_table_size(control) * PCI_MSIX_ENTRY_SIZE;
+
+    return len;
+}
+
+static int msi_cpu_callback(
+    struct notifier_block *nfb, unsigned long action, void *hcpu)
+{
+    unsigned int cpu = (unsigned long)hcpu;
+
+    switch ( action )
+    {
+    case CPU_UP_PREPARE:
+        if ( !alloc_cpumask_var(&per_cpu(scratch_mask, cpu)) )
+            return notifier_from_errno(ENOMEM);
+        break;
+    case CPU_UP_CANCELED:
+    case CPU_DEAD:
+        free_cpumask_var(per_cpu(scratch_mask, cpu));
+        break;
+    default:
+        break;
+    }
+
+    return NOTIFY_DONE;
+}
+
+static struct notifier_block msi_cpu_nfb = {
+    .notifier_call = msi_cpu_callback
+};
+
 void __init early_msi_init(void)
 {
     if ( use_msi < 0 )
         use_msi = !(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_MSI);
     if ( !use_msi )
         return;
+
+    register_cpu_notifier(&msi_cpu_nfb);
+    if ( msi_cpu_callback(&msi_cpu_nfb, CPU_UP_PREPARE, NULL) &
+         NOTIFY_STOP_MASK )
+        BUG();
 }
 
 static void dump_msi(unsigned char key)
@@ -1536,9 +1595,15 @@ static void dump_msi(unsigned char key)
     }
 }
 
+static struct keyhandler dump_msi_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_msi,
+    .desc = "dump MSI state"
+};
+
 static int __init msi_setup_keyhandler(void)
 {
-    register_keyhandler('M', dump_msi, "dump MSI state", 1);
+    register_keyhandler('M', &dump_msi_keyhandler);
     return 0;
 }
 __initcall(msi_setup_keyhandler);

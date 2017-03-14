@@ -21,6 +21,7 @@
  *
  */
 
+#include <xen/config.h>
 #include <xen/xenoprof.h>
 #include <xen/hvm/save.h>
 #include <xen/sched.h>
@@ -237,7 +238,7 @@ static int amd_vpmu_load(struct vcpu *v, bool_t from_guest)
         bool_t is_running = 0;
         struct xen_pmu_amd_ctxt *guest_ctxt = &vpmu->xenpmu_data->pmu.c.amd;
 
-        ASSERT(!has_vlapic(v->domain));
+        ASSERT(!is_hvm_vcpu(v));
 
         ctxt = vpmu->context;
         ctrl_regs = vpmu_reg_pointer(ctxt, ctrls);
@@ -313,7 +314,7 @@ static int amd_vpmu_save(struct vcpu *v,  bool_t to_guest)
     {
         struct xen_pmu_amd_ctxt *guest_ctxt, *ctxt;
 
-        ASSERT(!has_vlapic(v->domain));
+        ASSERT(!is_hvm_vcpu(v));
         ctxt = vpmu->context;
         guest_ctxt = &vpmu->xenpmu_data->pmu.c.amd;
         memcpy(&guest_ctxt->regs[0], &ctxt->regs[0], regs_sz);
@@ -392,7 +393,7 @@ static int amd_vpmu_do_wrmsr(unsigned int msr, uint64_t msr_content,
         vpmu_reset(vpmu, VPMU_RUNNING);
         if ( has_hvm_container_vcpu(v) && is_msr_bitmap_on(vpmu) )
              amd_vpmu_unset_msr_bitmap(v);
-        release_pmu_ownership(PMU_OWNER_HVM);
+        release_pmu_ownship(PMU_OWNER_HVM);
     }
 
     if ( !vpmu_is_set(vpmu, VPMU_CONTEXT_LOADED)
@@ -441,7 +442,7 @@ static void amd_vpmu_destroy(struct vcpu *v)
     vpmu->priv_context = NULL;
 
     if ( vpmu_is_set(vpmu, VPMU_RUNNING) )
-        release_pmu_ownership(PMU_OWNER_HVM);
+        release_pmu_ownship(PMU_OWNER_HVM);
 
     vpmu_clear(vpmu);
 }
@@ -487,7 +488,7 @@ static void amd_vpmu_dump(const struct vcpu *v)
     }
 }
 
-static const struct arch_vpmu_ops amd_vpmu_ops = {
+struct arch_vpmu_ops amd_vpmu_ops = {
     .do_wrmsr = amd_vpmu_do_wrmsr,
     .do_rdmsr = amd_vpmu_do_rdmsr,
     .do_interrupt = amd_vpmu_do_interrupt,
@@ -524,7 +525,7 @@ int svm_vpmu_initialise(struct vcpu *v)
     vpmu->context = ctxt;
     vpmu->priv_context = NULL;
 
-    if ( !has_vlapic(v->domain) )
+    if ( !is_hvm_vcpu(v) )
     {
         /* Copy register offsets to shared area */
         ASSERT(vpmu->xenpmu_data);

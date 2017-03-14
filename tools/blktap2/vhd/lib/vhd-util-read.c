@@ -197,6 +197,7 @@ vhd_print_parent(vhd_context_t *vhd, vhd_parent_locator_t *loc)
 	}
 
 	printf("       decoded name : %s\n", buf);
+	free(buf);
 }
 
 static void
@@ -229,7 +230,31 @@ vhd_print_parent_locators(vhd_context_t *vhd, int hex)
 }
 
 static void
-vhd_print_batmap_header(vhd_batmap_t *batmap, int hex)
+vhd_print_keyhash(vhd_context_t *vhd)
+{
+	int ret;
+	struct vhd_keyhash keyhash;
+
+	ret = vhd_get_keyhash(vhd, &keyhash);
+	if (ret)
+		printf("error reading keyhash: %d\n", ret);
+	else if (keyhash.cookie == 1) {
+		int i;
+
+		printf("Batmap keyhash nonce: ");
+		for (i = 0; i < sizeof(keyhash.nonce); i++)
+			printf("%02x", keyhash.nonce[i]);
+
+		printf("\nBatmap keyhash hash : ");
+		for (i = 0; i < sizeof(keyhash.hash); i++)
+			printf("%02x", keyhash.hash[i]);
+
+		printf("\n");
+	}
+}
+
+static void
+vhd_print_batmap_header(vhd_context_t *vhd, vhd_batmap_t *batmap, int hex)
 {
 	uint32_t cksm;
 
@@ -240,6 +265,7 @@ vhd_print_batmap_header(vhd_batmap_t *batmap, int hex)
 	       conv(hex, batmap->header.batmap_size));
 	printf("Batmap version      : 0x%08x\n",
 	       batmap->header.batmap_version);
+	vhd_print_keyhash(vhd);
 
 	cksm = vhd_checksum_batmap(batmap);
 	printf("Checksum            : 0x%x|0x%x (%s)\n",
@@ -280,7 +306,7 @@ vhd_print_headers(vhd_context_t *vhd, int hex)
 				return err;
 			}
 
-			vhd_print_batmap_header(&vhd->batmap, hex);
+			vhd_print_batmap_header(vhd, &vhd->batmap, hex);
 		}
 	}
 
@@ -461,12 +487,79 @@ vhd_test_bitmap(vhd_context_t *vhd, uint64_t sector, int count, int hex)
 
 		if (vhd->bat.bat[blk] == DD_BLK_UNUSED)
 			bit = 0;
-		else
-			bit = vhd_bitmap_test(vhd, buf, blk);
+		else {
+			/* Switch to sector, seems more in line with what -i does */
+			bit = vhd_bitmap_test(vhd, buf, sec);
+		}
 
 	print:
 		printf("block %s: ", conv(hex, blk));
 		printf("sec: %s: %d\n", conv(hex, sec), bit);
+	}
+
+	err = 0;
+ out:
+	free(buf);
+	return err;
+}
+
+static int
+vhd_print_bitmap_extents(vhd_context_t *vhd, uint64_t sector, int count,
+			 int hex)
+{
+	char *buf;
+	uint64_t cur;
+	int i, err, bit;
+	uint32_t blk, bm_blk, sec;
+	int64_t s, r;
+
+	if (vhd_sectors_to_bytes(sector + count) > vhd->footer.curr_size) {
+		printf("sector %s past end of file\n", conv(hex, sector));
+		return -ERANGE;
+	}
+
+	bm_blk = -1;
+	buf    = NULL;
+	s = -1;
+	r = 0;
+
+	for (i = 0; i < count; i++) {
+		cur = sector + i;
+		blk = cur / vhd->spb;
+		sec = cur % vhd->spb;
+
+		if (blk != bm_blk) {
+			bm_blk = blk;
+			free(buf);
+			buf = NULL;
+
+			if (vhd->bat.bat[blk] != DD_BLK_UNUSED) {
+				err = vhd_read_bitmap(vhd, blk, &buf);
+				if (err)
+					goto out;
+			}
+		}
+
+		if (vhd->bat.bat[blk] == DD_BLK_UNUSED)
+			bit = 0;
+		else
+			bit = vhd_bitmap_test(vhd, buf, sec);
+
+		if (bit) {
+			if (r == 0)
+				s = cur;
+			r++;
+		} else {
+			if (r > 0) {
+				printf("%s ", conv(hex, s));
+				printf("%s\n", conv(hex, r));
+			}
+			r = 0;
+		}
+	}
+	if (r > 0) {
+		printf("%s ", conv(hex, s));
+		printf("%s\n", conv(hex, r));
 	}
 
 	err = 0;
@@ -510,8 +603,8 @@ vhd_test_batmap(vhd_context_t *vhd, uint64_t block, int count, int hex)
 
 	for (i = 0; i < count; i++) {
 		cur = block + i;
-		fprintf(stderr, "batmap for block %s: %d\n", conv(hex, cur),
-			vhd_batmap_test(vhd, &vhd->batmap, cur));
+		printf("batmap for block %s: %d\n", conv(hex, cur),
+		       vhd_batmap_test(vhd, &vhd->batmap, cur));
 	}
 
 	return 0;
@@ -586,7 +679,7 @@ vhd_util_read(int argc, char **argv)
 	char *name;
 	vhd_context_t vhd;
 	int c, err, headers, hex;
-	uint64_t bat, bitmap, tbitmap, batmap, tbatmap, data, lsec, count, read;
+	uint64_t bat, bitmap, tbitmap, ebitmap, batmap, tbatmap, data, lsec, count, read;
 
 	err     = 0;
 	hex     = 0;
@@ -595,6 +688,7 @@ vhd_util_read(int argc, char **argv)
 	bat     = -1;
 	bitmap  = -1;
 	tbitmap = -1;
+	ebitmap = -1;
 	batmap  = -1;
 	tbatmap = -1;
 	data    = -1;
@@ -606,7 +700,7 @@ vhd_util_read(int argc, char **argv)
 		goto usage;
 
 	optind = 0;
-	while ((c = getopt(argc, argv, "n:pt:b:m:i:aj:d:c:r:xh")) != -1) {
+	while ((c = getopt(argc, argv, "n:pt:b:m:i:e:aj:d:c:r:xh")) != -1) {
 		switch(c) {
 		case 'n':
 			name = optarg;
@@ -625,6 +719,9 @@ vhd_util_read(int argc, char **argv)
 			break;
 		case 'i':
 			tbitmap = strtoul(optarg, NULL, 10);
+			break;
+		case 'e':
+			ebitmap = strtoul(optarg, NULL, 10);
 			break;
 		case 'a':
 			batmap = 1;
@@ -693,6 +790,12 @@ vhd_util_read(int argc, char **argv)
 			goto out;
 	}
 
+	if (ebitmap != -1) {
+		err = vhd_print_bitmap_extents(&vhd, ebitmap, count, hex);
+		if (err)
+			goto out;
+	}
+
 	if (batmap != -1) {
 		err = vhd_print_batmap(&vhd);
 		if (err)
@@ -732,6 +835,7 @@ vhd_util_read(int argc, char **argv)
 	       "-b blk      print bat entry\n"
 	       "-m blk      print bitmap\n"
 	       "-i sec      test bitmap for logical sector\n"
+	       "-e sec      output extent list of allocated logical sectors\n"
 	       "-a          print batmap\n"
 	       "-j blk      test batmap for block\n"
 	       "-d blk      print data\n"

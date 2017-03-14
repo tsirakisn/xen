@@ -32,7 +32,13 @@
 #error GUEST_PAGING_LEVELS not defined
 #endif
 
-#define VALID_GFN(m) (m != gfn_x(INVALID_GFN))
+#define VALID_GFN(m) (m != INVALID_GFN)
+
+static inline int
+valid_gfn(gfn_t m)
+{
+    return VALID_GFN(gfn_x(m));
+}
 
 static inline paddr_t
 gfn_to_paddr(gfn_t gfn)
@@ -60,20 +66,20 @@ typedef struct { guest_intpte_t l2; } guest_l2e_t;
 
 #define PRI_gpte "08x"
 
+static inline paddr_t guest_l1e_get_paddr(guest_l1e_t gl1e)
+{ return ((paddr_t) gl1e.l1) & (PADDR_MASK & PAGE_MASK); }
+static inline paddr_t guest_l2e_get_paddr(guest_l2e_t gl2e)
+{ return ((paddr_t) gl2e.l2) & (PADDR_MASK & PAGE_MASK); }
+
 static inline gfn_t guest_l1e_get_gfn(guest_l1e_t gl1e)
-{ return _gfn(gl1e.l1 >> PAGE_SHIFT); }
+{ return _gfn(guest_l1e_get_paddr(gl1e) >> PAGE_SHIFT); }
 static inline gfn_t guest_l2e_get_gfn(guest_l2e_t gl2e)
-{ return _gfn(gl2e.l2 >> PAGE_SHIFT); }
+{ return _gfn(guest_l2e_get_paddr(gl2e) >> PAGE_SHIFT); }
 
 static inline u32 guest_l1e_get_flags(guest_l1e_t gl1e)
 { return gl1e.l1 & 0xfff; }
 static inline u32 guest_l2e_get_flags(guest_l2e_t gl2e)
 { return gl2e.l2 & 0xfff; }
-
-static inline u32 guest_l1e_get_pkey(guest_l1e_t gl1e)
-{ return 0; }
-static inline u32 guest_l2e_get_pkey(guest_l2e_t gl2e)
-{ return 0; }
 
 static inline guest_l1e_t guest_l1e_from_gfn(gfn_t gfn, u32 flags)
 { return (guest_l1e_t) { (gfn_x(gfn) << PAGE_SHIFT) | flags }; }
@@ -115,6 +121,17 @@ typedef intpte_t guest_intpte_t;
 
 #define PRI_gpte "016"PRIx64
 
+static inline paddr_t guest_l1e_get_paddr(guest_l1e_t gl1e)
+{ return l1e_get_paddr(gl1e); }
+static inline paddr_t guest_l2e_get_paddr(guest_l2e_t gl2e)
+{ return l2e_get_paddr(gl2e); }
+static inline paddr_t guest_l3e_get_paddr(guest_l3e_t gl3e)
+{ return l3e_get_paddr(gl3e); }
+#if GUEST_PAGING_LEVELS >= 4
+static inline paddr_t guest_l4e_get_paddr(guest_l4e_t gl4e)
+{ return l4e_get_paddr(gl4e); }
+#endif
+
 static inline gfn_t guest_l1e_get_gfn(guest_l1e_t gl1e)
 { return _gfn(l1e_get_paddr(gl1e) >> PAGE_SHIFT); }
 static inline gfn_t guest_l2e_get_gfn(guest_l2e_t gl2e)
@@ -136,13 +153,6 @@ static inline u32 guest_l3e_get_flags(guest_l3e_t gl3e)
 static inline u32 guest_l4e_get_flags(guest_l4e_t gl4e)
 { return l4e_get_flags(gl4e); }
 #endif
-
-static inline u32 guest_l1e_get_pkey(guest_l1e_t gl1e)
-{ return l1e_get_pkey(gl1e); }
-static inline u32 guest_l2e_get_pkey(guest_l2e_t gl2e)
-{ return l2e_get_pkey(gl2e); }
-static inline u32 guest_l3e_get_pkey(guest_l3e_t gl3e)
-{ return l3e_get_pkey(gl3e); }
 
 static inline guest_l1e_t guest_l1e_from_gfn(gfn_t gfn, u32 flags)
 { return l1e_from_pfn(gfn_x(gfn), flags); }
@@ -241,28 +251,28 @@ struct guest_pagetable_walk
 
 /* Given a walk_t, translate the gw->va into the guest's notion of the
  * corresponding frame number. */
-static inline gfn_t guest_walk_to_gfn(const walk_t *gw)
+static inline gfn_t
+guest_walk_to_gfn(walk_t *gw)
 {
     if ( !(guest_l1e_get_flags(gw->l1e) & _PAGE_PRESENT) )
-        return INVALID_GFN;
+        return _gfn(INVALID_GFN);
     return guest_l1e_get_gfn(gw->l1e);
 }
 
 /* Given a walk_t, translate the gw->va into the guest's notion of the
  * corresponding physical address. */
-static inline paddr_t guest_walk_to_gpa(const walk_t *gw)
+static inline paddr_t
+guest_walk_to_gpa(walk_t *gw)
 {
-    gfn_t gfn = guest_walk_to_gfn(gw);
-
-    if ( gfn_eq(gfn, INVALID_GFN) )
-        return INVALID_PADDR;
-
-    return (gfn_x(gfn) << PAGE_SHIFT) | (gw->va & ~PAGE_MASK);
+    if ( !(guest_l1e_get_flags(gw->l1e) & _PAGE_PRESENT) )
+        return 0;
+    return guest_l1e_get_paddr(gw->l1e) + (gw->va & ~PAGE_MASK);
 }
 
 /* Given a walk_t from a successful walk, return the page-order of the 
  * page or superpage that the virtual address is in. */
-static inline unsigned int guest_walk_to_page_order(const walk_t *gw)
+static inline unsigned int 
+guest_walk_to_page_order(walk_t *gw)
 {
     /* This is only valid for successful walks - otherwise the 
      * PSE bits might be invalid. */
@@ -297,29 +307,31 @@ static inline unsigned int guest_walk_to_page_order(const walk_t *gw)
 #define GPT_RENAME2(_n, _l) _n ## _ ## _l ## _levels
 #define GPT_RENAME(_n, _l) GPT_RENAME2(_n, _l)
 #define guest_walk_tables GPT_RENAME(guest_walk_tables, GUEST_PAGING_LEVELS)
+#define map_domain_gfn GPT_RENAME(map_domain_gfn, GUEST_PAGING_LEVELS)
+
+void *map_domain_gfn(struct p2m_domain *p2m, gfn_t gfn, mfn_t *mfn,
+                     p2m_type_t *p2mt, p2m_query_t q, uint32_t *rc);
 
 extern uint32_t 
 guest_walk_tables(struct vcpu *v, struct p2m_domain *p2m, unsigned long va,
                   walk_t *gw, uint32_t pfec, mfn_t top_mfn, void *top_map);
 
 /* Pretty-print the contents of a guest-walk */
-static inline void print_gw(const walk_t *gw)
+static inline void print_gw(walk_t *gw)
 {
-    gprintk(XENLOG_INFO, "GUEST WALK TO %p\n", _p(gw->va));
+    gdprintk(XENLOG_INFO, "GUEST WALK TO %#lx:\n", gw->va);
 #if GUEST_PAGING_LEVELS >= 3 /* PAE or 64... */
 #if GUEST_PAGING_LEVELS >= 4 /* 64-bit only... */
-    gprintk(XENLOG_INFO, "   l4e=%" PRI_gpte " l4mfn=%" PRI_mfn "\n",
-            gw->l4e.l4, mfn_x(gw->l4mfn));
-    gprintk(XENLOG_INFO, "   l3e=%" PRI_gpte " l3mfn=%" PRI_mfn "\n",
-            gw->l3e.l3, mfn_x(gw->l3mfn));
-#else  /* PAE only... */
-    gprintk(XENLOG_INFO, "   l3e=%" PRI_gpte "\n", gw->l3e.l3);
+    gdprintk(XENLOG_INFO, "   l4mfn=%" PRI_mfn "\n", mfn_x(gw->l4mfn));
+    gdprintk(XENLOG_INFO, "   l4e=%" PRI_gpte "\n", gw->l4e.l4);
+    gdprintk(XENLOG_INFO, "   l3mfn=%" PRI_mfn "\n", mfn_x(gw->l3mfn));
 #endif /* PAE or 64... */
+    gdprintk(XENLOG_INFO, "   l3e=%" PRI_gpte "\n", gw->l3e.l3);
 #endif /* All levels... */
-    gprintk(XENLOG_INFO, "   l2e=%" PRI_gpte " l2mfn=%" PRI_mfn "\n",
-            gw->l2e.l2, mfn_x(gw->l2mfn));
-    gprintk(XENLOG_INFO, "   l1e=%" PRI_gpte " l1mfn=%" PRI_mfn "\n",
-            gw->l1e.l1, mfn_x(gw->l1mfn));
+    gdprintk(XENLOG_INFO, "   l2mfn=%" PRI_mfn "\n", mfn_x(gw->l2mfn));
+    gdprintk(XENLOG_INFO, "   l2e=%" PRI_gpte "\n", gw->l2e.l2);
+    gdprintk(XENLOG_INFO, "   l1mfn=%" PRI_mfn "\n", mfn_x(gw->l1mfn));
+    gdprintk(XENLOG_INFO, "   l1e=%" PRI_gpte "\n", gw->l1e.l1);
 }
 
 #endif /* _XEN_ASM_GUEST_PT_H */

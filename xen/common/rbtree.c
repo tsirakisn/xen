@@ -19,6 +19,7 @@
   linux/lib/rbtree.c
 */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/rbtree.h>
 

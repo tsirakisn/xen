@@ -21,8 +21,6 @@
 
 #include "utils.h"
 #include "io.h"
-#include <xenevtchn.h>
-#include <xengnttab.h>
 #include <xenstore.h>
 #include <xen/io/console.h>
 #include <xen/grant_table.h>
@@ -57,9 +55,11 @@
 #define MAX_STRLEN(x) ((sizeof(x) * CHAR_BIT + CHAR_BIT-1) / 10 * 3 + 2)
 
 /* How many events are allowed in each time period */
-#define RATE_LIMIT_ALLOWANCE 30
+#define RATE_LIMIT_ALLOWANCE 300
 /* Duration of each time period in ms */
 #define RATE_LIMIT_PERIOD 200
+/* Syslog buffer size */
+#define SYSLOG_BUFFER_SIZE 1024
 
 extern int log_reload;
 extern int log_guest;
@@ -73,7 +73,7 @@ static int log_time_hv_needts = 1;
 static int log_time_guest_needts = 1;
 static int log_hv_fd = -1;
 
-static xengnttab_handle *xgt_handle = NULL;
+static xc_gnttab *xcg_handle = NULL;
 
 static struct pollfd  *fds;
 static unsigned int current_array_size;
@@ -84,13 +84,14 @@ static unsigned int nr_fds;
 struct buffer {
 	char *data;
 	size_t consumed;
-	size_t size;
-	size_t capacity;
+	size_t size;         /* Amount of data currently in the buffer */
+	size_t capacity;     /* Amount of allocated data for the buffer */
 	size_t max_capacity;
 };
 
 struct domain {
 	int domid;
+	char *name;
 	int master_fd;
 	int master_pollfd_idx;
 	int slave_fd;
@@ -98,12 +99,13 @@ struct domain {
 	bool is_dead;
 	unsigned last_seen;
 	struct buffer buffer;
+	struct buffer slbuffer;
 	struct domain *next;
 	char *conspath;
 	int ring_ref;
-	xenevtchn_port_or_error_t local_port;
-	xenevtchn_port_or_error_t remote_port;
-	xenevtchn_handle *xce_handle;
+	evtchn_port_or_error_t local_port;
+	evtchn_port_or_error_t remote_port;
+	xc_evtchn *xce_handle;
 	int xce_pollfd_idx;
 	struct xencons_interface *interface;
 	int event_count;
@@ -158,6 +160,28 @@ static int write_with_timestamp(int fd, const char *data, size_t sz,
 	return 0;
 }
 
+static void flush_slb(struct domain *dom, struct buffer *slb)
+{
+	syslog(LOG_INFO, "%s (%i): %.*s", dom->name, dom->domid, (int)slb->size, slb->data);
+	slb->size = 0;
+}
+
+static void cutlines(struct domain *dom, struct buffer *b, int i)
+{
+	struct buffer *slb = &dom->slbuffer;
+
+	while (i < b->size) {
+		if (slb->size >= slb->capacity)
+			flush_slb(dom, slb); /* line too long */
+
+		if (!(b->data[i] == '\n' || b->data[i] == '\r'))
+			slb->data[slb->size++] = b->data[i];
+		else if (slb->size > 0)
+			flush_slb(dom, slb); /* line end marker detected */
+		++i;
+	}
+}
+
 static void buffer_append(struct domain *dom)
 {
 	struct buffer *buffer = &dom->buffer;
@@ -172,7 +196,7 @@ static void buffer_append(struct domain *dom)
 	if ((size == 0) || (size > sizeof(intf->out)))
 		return;
 
-	if ((buffer->capacity - buffer->size) < size) {
+	if ((buffer->capacity - buffer->size) < size + 1) {
 		buffer->capacity += (size + 1024);
 		buffer->data = realloc(buffer->data, buffer->capacity);
 		if (buffer->data == NULL) {
@@ -181,13 +205,15 @@ static void buffer_append(struct domain *dom)
 		}
 	}
 
-	while (cons != prod)
-		buffer->data[buffer->size++] = intf->out[
-			MASK_XENCONS_IDX(cons++, intf->out)];
+	while (cons != prod) {
+		char ch = intf->out[MASK_XENCONS_IDX(cons, intf->out)];
+		buffer->data[buffer->size++] = ch;
+		++cons;
+	}
 
 	xen_mb();
 	intf->out_cons = cons;
-	xenevtchn_notify(dom->xce_handle, dom->local_port);
+	xc_evtchn_notify(dom->xce_handle, dom->local_port);
 
 	/* Get the data to the logfile as early as possible because if
 	 * no one is listening on the console pty then it will fill up
@@ -210,6 +236,8 @@ static void buffer_append(struct domain *dom)
 			dolog(LOG_ERR, "Write to log failed "
 			      "on domain %d: %d (%s)\n",
 			      dom->domid, errno, strerror(errno));
+	} else {
+		cutlines(dom, buffer, buffer->size - size);
 	}
 
 	if (discard_overflowed_data && buffer->max_capacity &&
@@ -269,7 +297,12 @@ static int create_hv_log(void)
 {
 	char logfile[PATH_MAX];
 	int fd;
-	snprintf(logfile, PATH_MAX-1, "%s/hypervisor.log", log_dir);
+
+	if (!log_dir) {
+		return -1;
+	} else {
+		snprintf(logfile, PATH_MAX-1, "%s/hypervisor.log", log_dir);
+	}
 	logfile[PATH_MAX-1] = '\0';
 
 	fd = open(logfile, O_WRONLY|O_CREAT|O_APPEND, 0644);
@@ -290,35 +323,58 @@ static int create_hv_log(void)
 	return fd;
 }
 
+static char *safe_xs_read(const char *key, int tries)
+{
+	char *data = NULL;
+	unsigned int len;
+	struct timespec req = { .tv_sec = 0, .tv_nsec = 100000000 }; /* 100 ms */
+	int i;
+
+	for (i = 0; i < tries; i++) {
+		data = xs_read(xs, XBT_NULL, key, &len);
+		if (data && len > 0)
+			break;
+		free(data);
+		nanosleep(&req, NULL);
+	}
+	return data;
+}
+
+static char *name_from_dompath(const char *path)
+{
+	char namepath[64] = { 0 }, *name;
+	strncat( namepath, path , sizeof(namepath) - 1 );
+	strncat( namepath, "/name", sizeof(namepath) - strlen(namepath) - 1 );
+
+	name = safe_xs_read(namepath, 1);
+	/* without any name after 100 tries, just default to unnamed */
+	if (!name)
+		name = strdup("unnamed");
+	return name;
+}
+
 static int create_domain_log(struct domain *dom)
 {
 	char logfile[PATH_MAX];
-	char *namepath, *data, *s;
+	char *dompath;
 	int fd;
-	unsigned int len;
 
-	namepath = xs_get_domain_path(xs, dom->domid);
-	s = realloc(namepath, strlen(namepath) + 6);
-	if (s == NULL) {
-		free(namepath);
+	dompath = xs_get_domain_path(xs, dom->domid);
+	if (!dompath) {
 		return -1;
 	}
-	namepath = s;
-	strcat(namepath, "/name");
-	data = xs_read(xs, XBT_NULL, namepath, &len);
-	free(namepath);
-	if (!data)
-		return -1;
-	if (!len) {
-		free(data);
+	dom->name = name_from_dompath(dompath);
+	free(dompath);
+	if (!dom->name) {
 		return -1;
 	}
-
-	snprintf(logfile, PATH_MAX-1, "%s/guest-%s.log", log_dir, data);
-	free(data);
+	if (!log_dir) {
+		return -1;
+	}
+	snprintf(logfile, PATH_MAX - 1, "%s/%s.log", log_dir, dom->name);
 	logfile[PATH_MAX-1] = '\0';
 
-	fd = open(logfile, O_WRONLY|O_CREAT|O_APPEND, 0644);
+	fd = open(logfile, O_WRONLY | O_CREAT | O_APPEND, 0644);
 	if (fd == -1)
 		dolog(LOG_ERR, "Failed to open log %s: %d (%s)",
 		      logfile, errno, strerror(errno));
@@ -476,6 +532,12 @@ static int domain_create_tty(struct domain *dom)
 	if (fcntl(dom->master_fd, F_SETFL, O_NONBLOCK) == -1)
 		goto out;
 
+	memset(&dom->slbuffer, 0, sizeof(dom->slbuffer));
+	dom->slbuffer.capacity = dom->slbuffer.max_capacity = SYSLOG_BUFFER_SIZE;
+	dom->slbuffer.data = malloc(dom->slbuffer.capacity);
+	if (!dom->slbuffer.data)
+		goto out;
+
 	return 1;
 out:
 	domain_close_tty(dom);
@@ -521,8 +583,8 @@ static void domain_unmap_interface(struct domain *dom)
 {
 	if (dom->interface == NULL)
 		return;
-	if (xgt_handle && dom->ring_ref == -1)
-		xengnttab_unmap(xgt_handle, dom->interface, 1);
+	if (xcg_handle && dom->ring_ref == -1)
+		xc_gnttab_munmap(xcg_handle, dom->interface, 1);
 	else
 		munmap(dom->interface, XC_PAGE_SIZE);
 	dom->interface = NULL;
@@ -553,9 +615,9 @@ static int domain_create_ring(struct domain *dom)
 	if (ring_ref != dom->ring_ref && dom->ring_ref != -1)
 		domain_unmap_interface(dom);
 
-	if (!dom->interface && xgt_handle) {
+	if (!dom->interface && xcg_handle) {
 		/* Prefer using grant table */
-		dom->interface = xengnttab_map_grant_ref(xgt_handle,
+		dom->interface = xc_gnttab_map_grant_ref(xcg_handle,
 			dom->domid, GNTTAB_RESERVED_CONSOLE,
 			PROT_READ|PROT_WRITE);
 		dom->ring_ref = -1;
@@ -586,22 +648,22 @@ static int domain_create_ring(struct domain *dom)
 	dom->local_port = -1;
 	dom->remote_port = -1;
 	if (dom->xce_handle != NULL)
-		xenevtchn_close(dom->xce_handle);
+		xc_evtchn_close(dom->xce_handle);
 
 	/* Opening evtchn independently for each console is a bit
 	 * wasteful, but that's how the code is structured... */
-	dom->xce_handle = xenevtchn_open(NULL, 0);
+	dom->xce_handle = xc_evtchn_open(NULL, 0);
 	if (dom->xce_handle == NULL) {
 		err = errno;
 		goto out;
 	}
  
-	rc = xenevtchn_bind_interdomain(dom->xce_handle,
+	rc = xc_evtchn_bind_interdomain(dom->xce_handle,
 		dom->domid, remote_port);
 
 	if (rc == -1) {
 		err = errno;
-		xenevtchn_close(dom->xce_handle);
+		xc_evtchn_close(dom->xce_handle);
 		dom->xce_handle = NULL;
 		goto out;
 	}
@@ -611,7 +673,7 @@ static int domain_create_ring(struct domain *dom)
 	if (dom->master_fd == -1) {
 		if (!domain_create_tty(dom)) {
 			err = errno;
-			xenevtchn_close(dom->xce_handle);
+			xc_evtchn_close(dom->xce_handle);
 			dom->xce_handle = NULL;
 			dom->local_port = -1;
 			dom->remote_port = -1;
@@ -686,6 +748,7 @@ static struct domain *create_domain(int domid)
 	dom->ring_ref = -1;
 	dom->local_port = -1;
 	dom->remote_port = -1;
+	dom->name = NULL;
 
 	if (!watch_domain(dom, true))
 		goto out;
@@ -739,8 +802,16 @@ static void cleanup_domain(struct domain *d)
 	free(d->buffer.data);
 	d->buffer.data = NULL;
 
+	free(d->slbuffer.data);
+	d->slbuffer.data = NULL;
+
 	free(d->conspath);
 	d->conspath = NULL;
+
+        if (d->name) {
+	    free(d->name);
+	    d->name = NULL;
+        }
 
 	remove_domain(d);
 }
@@ -751,7 +822,7 @@ static void shutdown_domain(struct domain *d)
 	watch_domain(d, false);
 	domain_unmap_interface(d);
 	if (d->xce_handle != NULL)
-		xenevtchn_close(d->xce_handle);
+		xc_evtchn_close(d->xce_handle);
 	d->xce_handle = NULL;
 }
 
@@ -841,7 +912,7 @@ static void handle_tty_read(struct domain *dom)
 		}
 		xen_wmb();
 		intf->in_prod = prod;
-		xenevtchn_notify(dom->xce_handle, dom->local_port);
+		xc_evtchn_notify(dom->xce_handle, dom->local_port);
 	} else {
 		domain_close_tty(dom);
 		shutdown_domain(dom);
@@ -868,12 +939,12 @@ static void handle_tty_write(struct domain *dom)
 
 static void handle_ring_read(struct domain *dom)
 {
-	xenevtchn_port_or_error_t port;
+	evtchn_port_or_error_t port;
 
 	if (dom->is_dead)
 		return;
 
-	if ((port = xenevtchn_pending(dom->xce_handle)) == -1)
+	if ((port = xc_evtchn_pending(dom->xce_handle)) == -1)
 		return;
 
 	dom->event_count++;
@@ -881,7 +952,7 @@ static void handle_ring_read(struct domain *dom)
 	buffer_append(dom);
 
 	if (dom->event_count < RATE_LIMIT_ALLOWANCE)
-		(void)xenevtchn_unmask(dom->xce_handle, port);
+		(void)xc_evtchn_unmask(dom->xce_handle, port);
 }
 
 static void handle_xs(void)
@@ -908,39 +979,64 @@ static void handle_xs(void)
 	free(vec);
 }
 
-static void handle_hv_logs(xenevtchn_handle *xce_handle, bool force)
+static void handle_hv_logs(xc_evtchn *xce_handle, bool force)
 {
-	static char buffer[1024*16];
+	char buffer[1024*16 + 1];
+	static char lbuf[1024*16 + 1];
+	static int loff = 0;
+	int i = 0;
 	char *bufptr = buffer;
 	unsigned int size;
 	static uint32_t index = 0;
-	xenevtchn_port_or_error_t port = -1;
+	evtchn_port_or_error_t port = -1;
 
-	if (!force && ((port = xenevtchn_pending(xce_handle)) == -1))
+	if (!force && ((port = xc_evtchn_pending(xce_handle)) == -1))
 		return;
 
-	do
-	{
-		int logret;
+	if (log_hv_fd != -1) {
+		do
+		{
+			int logret;
 
+			size = sizeof(buffer);
+			if (xc_readconsolering(xc, bufptr, &size, 0, 1, &index) != 0 ||
+		    	    size == 0)
+				break;
+
+			if (log_time_hv)
+				logret = write_with_timestamp(log_hv_fd, buffer, size,
+							      &log_time_hv_needts);
+			else
+				logret = write_all(log_hv_fd, buffer, size);
+
+			if (logret < 0)
+				dolog(LOG_ERR, "Failed to write hypervisor log: "
+				      "%d (%s)", errno, strerror(errno));
+		} while (size == sizeof(buffer));
+	} else {
 		size = sizeof(buffer);
-		if (xc_readconsolering(xc, bufptr, &size, 0, 1, &index) != 0 ||
-		    size == 0)
-			break;
-
-		if (log_time_hv)
-			logret = write_with_timestamp(log_hv_fd, buffer, size,
-						      &log_time_hv_needts);
-		else
-			logret = write_all(log_hv_fd, buffer, size);
-
-		if (logret < 0)
-			dolog(LOG_ERR, "Failed to write hypervisor log: "
-				       "%d (%s)", errno, strerror(errno));
-	} while (size == sizeof(buffer));
+		if (xc_readconsolering(xc, bufptr, &size, 0, 1, &index) == 0 && size > 0) {
+			while (i < size) {
+				while ((i < size) &&
+				       (buffer[i] != '\n') && (buffer[i] != '\r')) {
+					lbuf[loff++] = buffer[i++];
+				}
+				if ((buffer[i] == '\n') || (buffer[i] == '\r')) {
+					lbuf[loff] = '\0';
+					++i;
+					if ((i < size) &&
+					    ((buffer[i] == '\n') || (buffer[i] == '\r'))) {
+						++i;
+					}
+					syslog(LOG_INFO, "hypervisor: %s", lbuf);
+					loff = 0;
+				}
+			}
+		}
+        }
 
 	if (port != -1)
-		(void)xenevtchn_unmask(xce_handle, port);
+		(void)xc_evtchn_unmask(xce_handle, port);
 }
 
 static void handle_log_reload(void)
@@ -1005,22 +1101,20 @@ static void reset_fds(void)
 void handle_io(void)
 {
 	int ret;
-	xenevtchn_port_or_error_t log_hv_evtchn = -1;
+	evtchn_port_or_error_t log_hv_evtchn = -1;
 	int xce_pollfd_idx = -1;
 	int xs_pollfd_idx = -1;
-	xenevtchn_handle *xce_handle = NULL;
+	xc_evtchn *xce_handle = NULL;
 
 	if (log_hv) {
-		xce_handle = xenevtchn_open(NULL, 0);
+		xce_handle = xc_evtchn_open(NULL, 0);
 		if (xce_handle == NULL) {
 			dolog(LOG_ERR, "Failed to open xce handle: %d (%s)",
 			      errno, strerror(errno));
 			goto out;
 		}
 		log_hv_fd = create_hv_log();
-		if (log_hv_fd == -1)
-			goto out;
-		log_hv_evtchn = xenevtchn_bind_virq(xce_handle, VIRQ_CON_RING);
+		log_hv_evtchn = xc_evtchn_bind_virq(xce_handle, VIRQ_CON_RING);
 		if (log_hv_evtchn == -1) {
 			dolog(LOG_ERR, "Failed to bind to VIRQ_CON_RING: "
 			      "%d (%s)", errno, strerror(errno));
@@ -1030,8 +1124,8 @@ void handle_io(void)
 		handle_hv_logs(xce_handle, true);
 	}
 
-	xgt_handle = xengnttab_open(NULL, 0);
-	if (xgt_handle == NULL) {
+	xcg_handle = xc_gnttab_open(NULL, 0);
+	if (xcg_handle == NULL) {
 		dolog(LOG_DEBUG, "Failed to open xcg handle: %d (%s)",
 		      errno, strerror(errno));
 	}
@@ -1049,11 +1143,11 @@ void handle_io(void)
 		xs_pollfd_idx = set_fds(xs_fileno(xs), POLLIN|POLLPRI);
 
 		if (log_hv)
-			xce_pollfd_idx = set_fds(xenevtchn_fd(xce_handle),
+			xce_pollfd_idx = set_fds(xc_evtchn_fd(xce_handle),
 						 POLLIN|POLLPRI);
 
 		if (clock_gettime(CLOCK_MONOTONIC, &ts) < 0)
-			break;
+			return;
 		now = ((long long)ts.tv_sec * 1000) + (ts.tv_nsec / 1000000);
 
 		/* Re-calculate any event counter allowances & unblock
@@ -1068,7 +1162,7 @@ void handle_io(void)
 			if ((now+5) > d->next_period) {
 				d->next_period = now + RATE_LIMIT_PERIOD;
 				if (d->event_count >= RATE_LIMIT_ALLOWANCE) {
-					(void)xenevtchn_unmask(d->xce_handle, d->local_port);
+					(void)xc_evtchn_unmask(d->xce_handle, d->local_port);
 				}
 				d->event_count = 0;
 			}
@@ -1084,7 +1178,7 @@ void handle_io(void)
 				if (discard_overflowed_data ||
 				    !d->buffer.max_capacity ||
 				    d->buffer.size < d->buffer.max_capacity) {
-					int evtchn_fd = xenevtchn_fd(d->xce_handle);
+					int evtchn_fd = xc_evtchn_fd(d->xce_handle);
 					d->xce_pollfd_idx = set_fds(evtchn_fd,
 								    POLLIN|POLLPRI);
 				}
@@ -1204,12 +1298,12 @@ void handle_io(void)
 		log_hv_fd = -1;
 	}
 	if (xce_handle != NULL) {
-		xenevtchn_close(xce_handle);
+		xc_evtchn_close(xce_handle);
 		xce_handle = NULL;
 	}
-	if (xgt_handle != NULL) {
-		xengnttab_close(xgt_handle);
-		xgt_handle = NULL;
+	if (xcg_handle != NULL) {
+		xc_gnttab_close(xcg_handle);
+		xcg_handle = NULL;
 	}
 	log_hv_evtchn = -1;
 }

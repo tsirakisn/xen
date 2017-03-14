@@ -4,6 +4,7 @@
  * HPET management.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/time.h>
 #include <xen/timer.h>

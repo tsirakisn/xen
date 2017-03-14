@@ -93,24 +93,10 @@ void ret_from_intr(void);
 
 #ifdef __ASSEMBLY__
 
-#ifdef HAVE_GAS_QUOTED_SYM
-#define SUBSECTION_LBL(tag)                        \
-        .ifndef .L.tag;                            \
-        .equ .L.tag, 1;                            \
-        .equ __stringify(__OBJECT_LABEL__.tag), .; \
-        .endif
-#else
-#define SUBSECTION_LBL(tag)                        \
-        .ifndef __OBJECT_LABEL__.tag;              \
-        __OBJECT_LABEL__.tag:;                     \
-        .endif
-#endif
-
 #define UNLIKELY_START(cond, tag) \
         .Ldispatch.tag:           \
         j##cond .Lunlikely.tag;   \
         .subsection 1;            \
-        SUBSECTION_LBL(unlikely); \
         .Lunlikely.tag:
 
 #define UNLIKELY_DISPATCH_LABEL(tag) \
@@ -127,19 +113,19 @@ void ret_from_intr(void);
         UNLIKELY_DONE(mp, tag);   \
         __UNLIKELY_END(tag)
 
-#define STACK_CPUINFO_FIELD(field) (1 - CPUINFO_sizeof + CPUINFO_##field)
-#define GET_STACK_END(reg)                        \
-        movl $STACK_SIZE-1, %e##reg;              \
-        orq  %rsp, %r##reg
+#define STACK_CPUINFO_FIELD(field) (STACK_SIZE-CPUINFO_sizeof+CPUINFO_##field)
+#define GET_STACK_BASE(reg)                       \
+        movq $~(STACK_SIZE-1),reg;                \
+        andq %rsp,reg
 
 #define GET_CPUINFO_FIELD(field, reg)             \
-        GET_STACK_END(reg);                       \
-        addq $STACK_CPUINFO_FIELD(field), %r##reg
+        GET_STACK_BASE(reg);                      \
+        addq $STACK_CPUINFO_FIELD(field),reg
 
 #define __GET_CURRENT(reg)                        \
-        movq STACK_CPUINFO_FIELD(current_vcpu)(%r##reg), %r##reg
+        movq STACK_CPUINFO_FIELD(current_vcpu)(reg),reg
 #define GET_CURRENT(reg)                          \
-        GET_STACK_END(reg);                       \
+        GET_STACK_BASE(reg);                      \
         __GET_CURRENT(reg)
 
 #ifndef NDEBUG
@@ -151,26 +137,13 @@ void ret_from_intr(void);
 #endif
 
 #define CPUINFO_FEATURE_OFFSET(feature)           \
-    (CPUINFO_features + (cpufeat_word(feature) * 4))
+        ((((feature) >> 3) & ~3) + CPUINFO_features)
 
 #else
-
-#ifdef HAVE_GAS_QUOTED_SYM
-#define SUBSECTION_LBL(tag)                                          \
-        ".ifndef .L." #tag "\n\t"                                    \
-        ".equ .L." #tag ", 1\n\t"                                    \
-        ".equ \"" __stringify(__OBJECT_LABEL__) "." #tag "\", .\n\t" \
-        ".endif"
-#else
-#define SUBSECTION_LBL(tag)                                          \
-        ".ifndef " __stringify(__OBJECT_LABEL__) "." #tag "\n\t"     \
-        __stringify(__OBJECT_LABEL__) "." #tag ":\n\t"               \
-        ".endif"
-#endif
 
 #ifdef __clang__ /* clang's builtin assember can't do .subsection */
 
-#define UNLIKELY_START_SECTION ".pushsection .text.unlikely,\"ax\""
+#define UNLIKELY_START_SECTION ".pushsection .fixup,\"ax\""
 #define UNLIKELY_END_SECTION   ".popsection"
 
 #else
@@ -180,16 +153,15 @@ void ret_from_intr(void);
 
 #endif
 
-#define UNLIKELY_START(cond, tag)                   \
-        "j" #cond " .Lunlikely." #tag ".%=;\n\t"   \
-        UNLIKELY_START_SECTION "\n\t"               \
-        SUBSECTION_LBL(unlikely) "\n"               \
-        ".Lunlikely." #tag ".%=:"
+#define UNLIKELY_START(cond, tag)          \
+        "j" #cond " .Lunlikely%=.tag;\n\t" \
+        UNLIKELY_START_SECTION "\n"        \
+        ".Lunlikely%=.tag:"
 
 #define UNLIKELY_END(tag)                  \
-        "jmp .Llikely." #tag ".%=;\n\t"    \
+        "jmp .Llikely%=.tag;\n\t"          \
         UNLIKELY_END_SECTION "\n"          \
-        ".Llikely." #tag ".%=:"
+        ".Llikely%=.tag:"
 
 #endif
 
@@ -205,7 +177,7 @@ void ret_from_intr(void);
         .popsection;                                                   \
         .pushsection .altinstructions, "a";                            \
         altinstruction_entry 661b, 661b, X86_FEATURE_ALWAYS, 3, 0;     \
-        altinstruction_entry 661b, 662b, X86_FEATURE_XEN_SMAP, 3, 3;       \
+        altinstruction_entry 661b, 662b, X86_FEATURE_SMAP, 3, 3;       \
         .popsection
 
 #define ASM_STAC ASM_AC(STAC)
@@ -217,21 +189,21 @@ void ret_from_intr(void);
         668: call cr4_pv32_restore;                                \
         .section .altinstructions, "a";                            \
         altinstruction_entry 667b, 667b, X86_FEATURE_ALWAYS, 5, 0; \
-        altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMEP, 5, 5;   \
-        altinstruction_entry 667b, 668b, X86_FEATURE_XEN_SMAP, 5, 5;   \
+        altinstruction_entry 667b, 668b, X86_FEATURE_SMEP, 5, 5;   \
+        altinstruction_entry 667b, 668b, X86_FEATURE_SMAP, 5, 5;   \
         .popsection
 
 #else
 static always_inline void clac(void)
 {
     /* Note: a barrier is implicit in alternative() */
-    alternative(ASM_NOP3, __stringify(__ASM_CLAC), X86_FEATURE_XEN_SMAP);
+    alternative(ASM_NOP3, __stringify(__ASM_CLAC), X86_FEATURE_SMAP);
 }
 
 static always_inline void stac(void)
 {
     /* Note: a barrier is implicit in alternative() */
-    alternative(ASM_NOP3, __stringify(__ASM_STAC), X86_FEATURE_XEN_SMAP);
+    alternative(ASM_NOP3, __stringify(__ASM_STAC), X86_FEATURE_SMAP);
 }
 #endif
 
@@ -313,13 +285,6 @@ static always_inline void stac(void)
 987:
 .endm
 
-#define LOAD_ONE_REG(reg, compat) \
-.if !(compat); \
-        movq  UREGS_r##reg(%rsp),%r##reg; \
-.else; \
-        movl  UREGS_r##reg(%rsp),%e##reg; \
-.endif
-
 /*
  * Reload registers not preserved by C code from frame.
  *
@@ -333,14 +298,16 @@ static always_inline void stac(void)
         movq  UREGS_r10(%rsp),%r10
         movq  UREGS_r9(%rsp),%r9
         movq  UREGS_r8(%rsp),%r8
-.endif
 .if \ax
-        LOAD_ONE_REG(ax, \compat)
+        movq  UREGS_rax(%rsp),%rax
 .endif
-        LOAD_ONE_REG(cx, \compat)
-        LOAD_ONE_REG(dx, \compat)
-        LOAD_ONE_REG(si, \compat)
-        LOAD_ONE_REG(di, \compat)
+.elseif \ax
+        movl  UREGS_rax(%rsp),%eax
+.endif
+        movq  UREGS_rcx(%rsp),%rcx
+        movq  UREGS_rdx(%rsp),%rdx
+        movq  UREGS_rsi(%rsp),%rsi
+        movq  UREGS_rdi(%rsp),%rdi
 .endm
 
 /*
@@ -373,19 +340,18 @@ static always_inline void stac(void)
         jne   789f
         cmpq  UREGS_r12(%rsp),%r12
         je    987f
-789:    BUG   /* Corruption of partial register state. */
+789:    ud2
         .subsection 0
 #endif
 .endif
-987:
-        LOAD_ONE_REG(bp, \compat)
-        LOAD_ONE_REG(bx, \compat)
+987:    movq  UREGS_rbp(%rsp),%rbp
+        movq  UREGS_rbx(%rsp),%rbx
         subq  $-(UREGS_error_code-UREGS_r15+\adj), %rsp
 .endm
 
 #endif
 
-#ifdef CONFIG_PERF_COUNTERS
+#ifdef PERF_COUNTERS
 #define PERFC_INCR(_name,_idx,_cur)             \
         pushq _cur;                             \
         movslq VCPU_processor(_cur),_cur;       \

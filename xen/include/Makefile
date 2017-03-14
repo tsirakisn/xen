@@ -26,12 +26,10 @@ headers-$(CONFIG_X86)     += compat/arch-x86/pmu.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen-mca.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen.h
 headers-$(CONFIG_X86)     += compat/arch-x86/xen-$(compat-arch-y).h
-headers-$(CONFIG_X86)     += compat/hvm/hvm_vcpu.h
-headers-$(CONFIG_X86)     += compat/hvm/dm_op.h
 headers-y                 += compat/arch-$(compat-arch-y).h compat/pmu.h compat/xlat.h
-headers-$(CONFIG_FLASK)   += compat/xsm/flask_op.h
+headers-$(FLASK_ENABLE)   += compat/xsm/flask_op.h
 
-cppflags-y                := -include public/xen-compat.h -DXEN_GENERATING_COMPAT_HEADERS
+cppflags-y                := -include public/xen-compat.h
 cppflags-$(CONFIG_X86)    += -m32
 
 # 8-byte types are 4-byte aligned on x86_32 ...
@@ -60,7 +58,7 @@ compat/%.h: compat/%.i Makefile $(BASEDIR)/tools/compat-build-header.py
 	mv -f $@.new $@
 
 compat/%.i: compat/%.c Makefile
-	$(CPP) $(filter-out -M% %.d -include %/include/xen/config.h,$(CFLAGS)) $(cppflags-y) -o $@ $<
+	$(CPP) $(filter-out -M% .%.d -include %/include/xen/config.h,$(CFLAGS)) $(cppflags-y) -o $@ $<
 
 compat/%.c: public/%.h xlat.lst Makefile $(BASEDIR)/tools/compat-build-source.py
 	mkdir -p $(@D)
@@ -94,7 +92,7 @@ all: headers.chk headers++.chk
 
 PUBLIC_HEADERS := $(filter-out public/arch-% public/dom0_ops.h, $(wildcard public/*.h public/*/*.h) $(public-y))
 
-PUBLIC_ANSI_HEADERS := $(filter-out public/%ctl.h public/xsm/% public/%hvm/save.h, $(PUBLIC_HEADERS))
+PUBLIC_ANSI_HEADERS := $(filter-out public/%ctl.h public/xsm/% public/%hvm/save.h public/v4v.h, $(PUBLIC_HEADERS))
 
 headers.chk: $(PUBLIC_ANSI_HEADERS) Makefile
 	for i in $(filter %.h,$^); do \
@@ -118,15 +116,5 @@ headers++.chk: $(PUBLIC_HEADERS) Makefile
 
 endif
 
-ifeq ($(XEN_TARGET_ARCH),x86_64)
-
-$(BASEDIR)/include/asm-x86/cpuid-autogen.h: $(BASEDIR)/include/public/arch-x86/cpufeatureset.h $(BASEDIR)/tools/gen-cpuid.py FORCE
-	$(PYTHON) $(BASEDIR)/tools/gen-cpuid.py -i $^ -o $@.new
-	$(call move-if-changed,$@.new,$@)
-
-all: $(BASEDIR)/include/asm-x86/cpuid-autogen.h
-endif
-
 clean::
 	rm -rf compat headers.chk headers++.chk
-	rm -f $(BASEDIR)/include/asm-x86/cpuid-autogen.h

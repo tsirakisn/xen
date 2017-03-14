@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/console.h>
 #include <xen/device_tree.h>
 #include <xen/init.h>
@@ -28,7 +29,6 @@
 #include <xen/time.h>
 #include <xen/sched.h>
 #include <xen/event.h>
-#include <xen/acpi.h>
 #include <asm/system.h>
 #include <asm/time.h>
 #include <asm/gic.h>
@@ -65,51 +65,8 @@ unsigned int timer_get_irq(enum timer_ppi ppi)
 
 static __initdata struct dt_device_node *timer;
 
-#ifdef CONFIG_ACPI
-static u32 __init acpi_get_timer_irq_type(u32 flags)
-{
-    return (flags & ACPI_GTDT_INTERRUPT_MODE) ? IRQ_TYPE_EDGE_BOTH
-                                              : IRQ_TYPE_LEVEL_MASK;
-}
-
-/* Initialize per-processor generic timer */
-static int __init arch_timer_acpi_init(struct acpi_table_header *header)
-{
-    u32 irq_type;
-    struct acpi_table_gtdt *gtdt;
-
-    gtdt = container_of(header, struct acpi_table_gtdt, header);
-
-    /* Initialize all the generic timer IRQ variable from GTDT table */
-    irq_type = acpi_get_timer_irq_type(gtdt->non_secure_el1_flags);
-    irq_set_type(gtdt->non_secure_el1_interrupt, irq_type);
-    timer_irq[TIMER_PHYS_NONSECURE_PPI] = gtdt->non_secure_el1_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->secure_el1_flags);
-    irq_set_type(gtdt->secure_el1_interrupt, irq_type);
-    timer_irq[TIMER_PHYS_SECURE_PPI] = gtdt->secure_el1_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->virtual_timer_flags);
-    irq_set_type(gtdt->virtual_timer_interrupt, irq_type);
-    timer_irq[TIMER_VIRT_PPI] = gtdt->virtual_timer_interrupt;
-
-    irq_type = acpi_get_timer_irq_type(gtdt->non_secure_el2_flags);
-    irq_set_type(gtdt->non_secure_el2_interrupt, irq_type);
-    timer_irq[TIMER_HYP_PPI] = gtdt->non_secure_el2_interrupt;
-
-    return 0;
-}
-
-static void __init preinit_acpi_xen_time(void)
-{
-    acpi_table_parse(ACPI_SIG_GTDT, arch_timer_acpi_init);
-}
-#else
-static void __init preinit_acpi_xen_time(void) { }
-#endif
-
 /* Set up the timer on the boot CPU (early init function) */
-static void __init preinit_dt_xen_time(void)
+void __init preinit_xen_time(void)
 {
     static const struct dt_device_match timer_ids[] __initconst =
     {
@@ -125,35 +82,24 @@ static void __init preinit_dt_xen_time(void)
 
     dt_device_set_used_by(timer, DOMID_XEN);
 
+    res = platform_init_time();
+    if ( res )
+        panic("Timer: Cannot initialize platform timer");
+
     res = dt_property_read_u32(timer, "clock-frequency", &rate);
     if ( res )
     {
         cpu_khz = rate / 1000;
         timer_dt_clock_frequency = rate;
     }
-}
-
-void __init preinit_xen_time(void)
-{
-    int res;
-
-    /* Initialize all the generic timers presented in GTDT */
-    if ( acpi_disabled )
-        preinit_dt_xen_time();
     else
-        preinit_acpi_xen_time();
-
-    if ( !cpu_khz )
         cpu_khz = READ_SYSREG32(CNTFRQ_EL0) / 1000;
-
-    res = platform_init_time();
-    if ( res )
-        panic("Timer: Cannot initialize platform timer");
 
     boot_count = READ_SYSREG64(CNTPCT_EL0);
 }
 
-static void __init init_dt_xen_time(void)
+/* Set up the timer on the boot CPU (late init function) */
+int __init init_xen_time(void)
 {
     int res;
     unsigned int i;
@@ -167,13 +113,6 @@ static void __init init_dt_xen_time(void)
             panic("Timer: Unable to retrieve IRQ %u from the device tree", i);
         timer_irq[i] = res;
     }
-}
-
-/* Set up the timer on the boot CPU (late init function) */
-int __init init_xen_time(void)
-{
-    if ( acpi_disabled )
-        init_dt_xen_time();
 
     /* Check that this CPU supports the Generic Timer interface */
     if ( !cpu_has_gentimer )
@@ -283,7 +222,7 @@ static void check_timer_irq_cfg(unsigned int irq, const char *which)
      * The interrupt controller driver will update desc->arch.type with
      * the actual type which ended up configured in the hardware.
      */
-    if ( desc->arch.type & IRQ_TYPE_LEVEL_MASK )
+    if ( desc->arch.type & DT_IRQ_TYPE_LEVEL_MASK )
         return;
 
     printk(XENLOG_WARNING
@@ -291,7 +230,7 @@ static void check_timer_irq_cfg(unsigned int irq, const char *which)
 }
 
 /* Set up the timer interrupt on this CPU */
-void init_timer_interrupt(void)
+void __cpuinit init_timer_interrupt(void)
 {
     /* Sensible defaults */
     WRITE_SYSREG64(0, CNTVOFF_EL2);     /* No VM-specific offset */
@@ -339,6 +278,11 @@ void domain_set_time_offset(struct domain *d, int64_t time_offset_seconds)
 {
     d->time_offset_seconds = time_offset_seconds;
     /* XXX update guest visible wallclock time */
+}
+
+struct tm wallclock_time(uint64_t *ns)
+{
+    return (struct tm) { 0 };
 }
 
 /*

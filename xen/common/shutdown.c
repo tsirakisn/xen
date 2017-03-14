@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
@@ -62,12 +63,6 @@ void hwdom_shutdown(u8 reason)
 #ifdef CONFIG_KEXEC
         kexec_crash();
 #endif
-        machine_restart(0);
-        break; /* not reached */
-
-    case SHUTDOWN_soft_reset:
-        printk("Hardware domain %d did unsupported soft reset, rebooting.\n",
-               hardware_domain->domain_id);
         machine_restart(0);
         break; /* not reached */
 

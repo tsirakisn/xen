@@ -30,6 +30,9 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
+
+
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/sched.h>
 #include <xen/errno.h>
@@ -42,14 +45,12 @@
 
 #define domain_has_vuart(d) ((d)->arch.vuart.info != NULL)
 
-static int vuart_mmio_read(struct vcpu *v, mmio_info_t *info,
-                           register_t *r, void *priv);
-static int vuart_mmio_write(struct vcpu *v, mmio_info_t *info,
-                            register_t r, void *priv);
+static int vuart_mmio_read(struct vcpu *v, mmio_info_t *info);
+static int vuart_mmio_write(struct vcpu *v, mmio_info_t *info);
 
 static const struct mmio_handler_ops vuart_mmio_handler = {
-    .read  = vuart_mmio_read,
-    .write = vuart_mmio_write,
+    .read_handler  = vuart_mmio_read,
+    .write_handler = vuart_mmio_write,
 };
 
 int domain_vuart_init(struct domain *d)
@@ -69,8 +70,7 @@ int domain_vuart_init(struct domain *d)
 
     register_mmio_handler(d, &vuart_mmio_handler,
                           d->arch.vuart.info->base_addr,
-                          d->arch.vuart.info->size,
-                          NULL);
+                          d->arch.vuart.info->size);
 
     return 0;
 }
@@ -105,10 +105,12 @@ static void vuart_print_char(struct vcpu *v, char c)
     spin_unlock(&uart->lock);
 }
 
-static int vuart_mmio_read(struct vcpu *v, mmio_info_t *info,
-                           register_t *r, void *priv)
+static int vuart_mmio_read(struct vcpu *v, mmio_info_t *info)
 {
     struct domain *d = v->domain;
+    struct hsr_dabt dabt = info->dabt;
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    register_t *r = select_user_reg(regs, dabt.reg);
     paddr_t offset = info->gpa - d->arch.vuart.info->base_addr;
 
     perfc_incr(vuart_reads);
@@ -123,17 +125,19 @@ static int vuart_mmio_read(struct vcpu *v, mmio_info_t *info,
     return 1;
 }
 
-static int vuart_mmio_write(struct vcpu *v, mmio_info_t *info,
-                            register_t r, void *priv)
+static int vuart_mmio_write(struct vcpu *v, mmio_info_t *info)
 {
     struct domain *d = v->domain;
+    struct hsr_dabt dabt = info->dabt;
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    register_t *r = select_user_reg(regs, dabt.reg);
     paddr_t offset = info->gpa - d->arch.vuart.info->base_addr;
 
     perfc_incr(vuart_writes);
 
     if ( offset == d->arch.vuart.info->data_off )
         /* ignore any status bits */
-        vuart_print_char(v, r & 0xFF);
+        vuart_print_char(v, *r & 0xFF);
 
     return 1;
 }

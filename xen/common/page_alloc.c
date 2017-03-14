@@ -20,106 +20,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * In general Xen maintains two pools of memory:
- *
- * - Xen heap: Memory which is always mapped (i.e accessible by
- *             virtual address), via a permanent and contiguous
- *             "direct mapping". Macros like va() and pa() are valid
- *             for such memory and it is always permissible to stash
- *             pointers to Xen heap memory in data structures etc.
- *
- *             Xen heap pages are always anonymous (that is, not tied
- *             or accounted to any particular domain).
- *
- * - Dom heap: Memory which must be explicitly mapped, usually
- *             transiently with map_domain_page(), in order to be
- *             used. va() and pa() are not valid for such memory. Care
- *             should be taken when stashing pointers to dom heap
- *             pages that those mappings are permanent (e.g. vmap() or
- *             map_domain_page_global()), it is not safe to stash
- *             transient mappings such as those from map_domain_page()
- *
- *             Dom heap pages are often tied to a particular domain,
- *             but need not be (passing domain==NULL results in an
- *             anonymous dom heap allocation).
- *
- * The exact nature of this split is a (sub)arch decision which can
- * select one of three main variants:
- *
- * CONFIG_SEPARATE_XENHEAP=y
- *
- *   The xen heap is maintained as an entirely separate heap.
- *
- *   Arch code arranges for some (perhaps small) amount of physical
- *   memory to be covered by a direct mapping and registers that
- *   memory as the Xen heap (via init_xenheap_pages()) and the
- *   remainder as the dom heap.
- *
- *   This mode of operation is most commonly used by 32-bit arches
- *   where the virtual address space is insufficient to map all RAM.
- *
- * CONFIG_SEPARATE_XENHEAP=n W/ DIRECT MAP OF ALL RAM
- *
- *   All of RAM is covered by a permanent contiguous mapping and there
- *   is only a single heap.
- *
- *   Memory allocated from the Xen heap is flagged (in
- *   page_info.count_info) with PGC_xen_heap. Memory allocated from
- *   the Dom heap must still be explicitly mapped before use
- *   (e.g. with map_domain_page) in particular in common code.
- *
- *   xenheap_max_mfn() should not be called by arch code.
- *
- *   This mode of operation is most commonly used by 64-bit arches
- *   which have sufficient free virtual address space to permanently
- *   map the largest practical amount RAM currently expected on that
- *   arch.
- *
- * CONFIG_SEPARATE_XENHEAP=n W/ DIRECT MAP OF ONLY PARTIAL RAM
- *
- *   There is a single heap, but only the beginning (up to some
- *   threshold) is covered by a permanent contiguous mapping.
- *
- *   Memory allocated from the Xen heap is allocated from below the
- *   threshold and flagged with PGC_xen_heap. Memory allocated from
- *   the dom heap is allocated from anywhere in the heap (although it
- *   will prefer to allocate from as high as possible to try and keep
- *   Xen heap suitable memory available).
- *
- *   Arch code must call xenheap_max_mfn() to signal the limit of the
- *   direct mapping.
- *
- *   This mode of operation is most commonly used by 64-bit arches
- *   which have a restricted amount of virtual address space available
- *   for a direct map (due to e.g. reservations for other purposes)
- *   such that it is not possible to map all of RAM on systems with
- *   the largest practical amount of RAM currently expected on that
- *   arch.
- *
- * Boot Allocator
- *
- *   In addition to the two primary pools (xen heap and dom heap) a
- *   third "boot allocator" is used at start of day. This is a
- *   simplified allocator which can be used.
- *
- *   Typically all memory which is destined to be dom heap memory
- *   (which is everything in the CONFIG_SEPARATE_XENHEAP=n
- *   configurations) is first allocated to the boot allocator (with
- *   init_boot_pages()) and is then handed over to the main dom heap in
- *   end_boot_allocator().
- *
- * "Contiguous" mappings
- *
- *   Note that although the above talks about "contiguous" mappings
- *   some architectures implement a scheme ("PDX compression") to
- *   compress unused portions of the machine address space (i.e. large
- *   gaps between distinct banks of memory) in order to avoid creating
- *   enormous frame tables and direct maps which mostly map
- *   nothing. Thus a contiguous mapping may still have distinct
- *   regions within it.
- */
-
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/types.h>
 #include <xen/lib.h>
@@ -131,7 +32,6 @@
 #include <xen/domain_page.h>
 #include <xen/keyhandler.h>
 #include <xen/perfc.h>
-#include <xen/pfn.h>
 #include <xen/numa.h>
 #include <xen/nodemask.h>
 #include <xen/event.h>
@@ -176,6 +76,9 @@ size_param("bootscrub_chunk", opt_bootscrub_chunk);
  */
 static unsigned int dma_bitsize;
 integer_param("dma_bits", dma_bitsize);
+
+#define round_pgdown(_p)  ((_p)&PAGE_MASK)
+#define round_pgup(_p)    (((_p)+(PAGE_SIZE-1))&PAGE_MASK)
 
 /* Offlined page list, protected by heap_lock. */
 PAGE_LIST_HEAD(page_offlined_list);
@@ -326,16 +229,13 @@ unsigned long __init alloc_boot_pages(
     unsigned long nr_pfns, unsigned long pfn_align)
 {
     unsigned long pg, _e;
-    unsigned int i = nr_bootmem_regions;
+    int i;
 
-    BOOT_BUG_ON(!nr_bootmem_regions);
-
-    while ( i-- )
+    for ( i = nr_bootmem_regions - 1; i >= 0; i-- )
     {
         struct bootmem_region *r = &bootmem_region_list[i];
-
         pg = (r->e - nr_pfns) & ~(pfn_align - 1);
-        if ( pg >= r->e || pg < r->s )
+        if ( pg < r->s )
             continue;
 
 #if defined(CONFIG_X86) && !defined(NDEBUG)
@@ -652,7 +552,7 @@ static void __init setup_low_mem_virq(void)
 static void check_low_mem_virq(void)
 {
     unsigned long avail_pages = total_avail_pages +
-        tmem_freeable_pages() - outstanding_claims;
+        (opt_tmem ? tmem_freeable_pages() : 0) - outstanding_claims;
 
     if ( unlikely(avail_pages <= low_mem_virq_th) )
     {
@@ -738,7 +638,7 @@ static struct page_info *alloc_heap_pages(
      * Others try tmem pools then fail.  This is a workaround until all
      * post-dom0-creation-multi-page allocations can be eliminated.
      */
-    if ( ((order == 0) || (order >= 9)) &&
+    if ( opt_tmem && ((order == 0) || (order >= 9)) &&
          (total_avail_pages <= midsize_alloc_zone_pages) &&
          tmem_freeable_pages() )
         goto try_tmem;
@@ -827,9 +727,14 @@ static struct page_info *alloc_heap_pages(
         BUG_ON(pg[i].count_info != PGC_state_free);
         pg[i].count_info = PGC_state_inuse;
 
-        if ( !(memflags & MEMF_no_tlbflush) )
-            accumulate_tlbflush(&need_tlbflush, &pg[i],
-                                &tlbflush_timestamp);
+        if ( pg[i].u.free.need_tlbflush &&
+             (pg[i].tlbflush_timestamp <= tlbflush_current_time()) &&
+             (!need_tlbflush ||
+              (pg[i].tlbflush_timestamp > tlbflush_timestamp)) )
+        {
+            need_tlbflush = 1;
+            tlbflush_timestamp = pg[i].tlbflush_timestamp;
+        }
 
         /* Initialise fields which have other uses for free pages. */
         pg[i].u.inuse.type_info = 0;
@@ -844,7 +749,15 @@ static struct page_info *alloc_heap_pages(
     spin_unlock(&heap_lock);
 
     if ( need_tlbflush )
-        filtered_flush_tlb_mask(tlbflush_timestamp);
+    {
+        cpumask_t mask = cpu_online_map;
+        tlbflush_filter(mask, tlbflush_timestamp);
+        if ( !cpumask_empty(&mask) )
+        {
+            perfc_incr(need_flush_tlb_flush);
+            flush_tlb_mask(&mask);
+        }
+    }
 
     return pg;
 }
@@ -971,7 +884,7 @@ static void free_heap_pages(
     avail[node][zone] += 1 << order;
     total_avail_pages += 1 << order;
 
-    if ( tmem_enabled() )
+    if ( opt_tmem )
         midsize_alloc_zone_pages = max(
             midsize_alloc_zone_pages, total_avail_pages / MIDSIZE_ALLOC_FRAC);
 
@@ -983,7 +896,7 @@ static void free_heap_pages(
         if ( (page_to_mfn(pg) & mask) )
         {
             /* Merge with predecessor block? */
-            if ( !mfn_valid(_mfn(page_to_mfn(pg-mask))) ||
+            if ( !mfn_valid(page_to_mfn(pg-mask)) ||
                  !page_state_is(pg-mask, free) ||
                  (PFN_ORDER(pg-mask) != order) ||
                  (phys_to_nid(page_to_maddr(pg-mask)) != node) )
@@ -994,7 +907,7 @@ static void free_heap_pages(
         else
         {
             /* Merge with successor block? */
-            if ( !mfn_valid(_mfn(page_to_mfn(pg+mask))) ||
+            if ( !mfn_valid(page_to_mfn(pg+mask)) ||
                  !page_state_is(pg+mask, free) ||
                  (PFN_ORDER(pg+mask) != order) ||
                  (phys_to_nid(page_to_maddr(pg+mask)) != node) )
@@ -1080,7 +993,7 @@ int offline_page(unsigned long mfn, int broken, uint32_t *status)
     struct domain *owner;
     struct page_info *pg;
 
-    if ( !mfn_valid(_mfn(mfn)) )
+    if ( !mfn_valid(mfn) )
     {
         dprintk(XENLOG_WARNING,
                 "try to offline page out of range %lx\n", mfn);
@@ -1189,7 +1102,7 @@ unsigned int online_page(unsigned long mfn, uint32_t *status)
     struct page_info *pg;
     int ret;
 
-    if ( !mfn_valid(_mfn(mfn)) )
+    if ( !mfn_valid(mfn) )
     {
         dprintk(XENLOG_WARNING, "call expand_pages() first\n");
         return -EINVAL;
@@ -1240,7 +1153,7 @@ int query_page_offline(unsigned long mfn, uint32_t *status)
 {
     struct page_info *pg;
 
-    if ( !mfn_valid(_mfn(mfn)) || !page_is_ram_type(mfn, RAM_TYPE_CONVENTIONAL) )
+    if ( !mfn_valid(mfn) || !page_is_ram_type(mfn, RAM_TYPE_CONVENTIONAL) )
     {
         dprintk(XENLOG_WARNING, "call expand_pages() first\n");
         return -EINVAL;
@@ -1352,7 +1265,6 @@ void __init end_boot_allocator(void)
         if ( r->s < r->e )
             init_heap_pages(mfn_to_page(r->s), r->e - r->s);
     }
-    nr_bootmem_regions = 0;
     init_heap_pages(virt_to_page(bootmem_region_list), 1);
 
     if ( !dma_bitsize && (num_online_nodes() > 1) )
@@ -1410,7 +1322,7 @@ static void __init smp_scrub_heap_pages(void *data)
         pg = mfn_to_page(mfn);
 
         /* Check the mfn is valid and page is free. */
-        if ( !mfn_valid(_mfn(mfn)) || !page_state_is(pg, free) )
+        if ( !mfn_valid(mfn) || !page_state_is(pg, free) )
             continue;
 
         scrub_one_page(pg);
@@ -1654,7 +1566,7 @@ void *alloc_xenheap_pages(unsigned int order, unsigned int memflags)
     ASSERT(!in_irq());
 
     if ( xenheap_bits && (memflags >> _MEMF_bits) > xenheap_bits )
-        memflags &= ~MEMF_bits(~0U);
+        memflags &= ~MEMF_bits(~0);
     if ( !(memflags >> _MEMF_bits) )
         memflags |= MEMF_bits(xenheap_bits);
 
@@ -1719,7 +1631,6 @@ int assign_pages(
     unsigned int order,
     unsigned int memflags)
 {
-    int rc = 0;
     unsigned long i;
 
     spin_lock(&d->page_alloc_lock);
@@ -1728,20 +1639,18 @@ int assign_pages(
     {
         gdprintk(XENLOG_INFO, "Cannot assign page to domain%d -- dying.\n",
                 d->domain_id);
-        rc = -EINVAL;
-        goto out;
+        goto fail;
     }
 
     if ( !(memflags & MEMF_no_refcount) )
     {
         if ( unlikely((d->tot_pages + (1 << order)) > d->max_pages) )
         {
-            if ( !tmem_enabled() || order != 0 || d->tot_pages != d->max_pages )
+            if ( !opt_tmem || order != 0 || d->tot_pages != d->max_pages )
                 gprintk(XENLOG_INFO, "Over-allocation for domain %u: "
                         "%u > %u\n", d->domain_id,
                         d->tot_pages + (1 << order), d->max_pages);
-            rc = -E2BIG;
-            goto out;
+            goto fail;
         }
 
         if ( unlikely(d->tot_pages == 0) )
@@ -1760,9 +1669,12 @@ int assign_pages(
         page_list_add_tail(&pg[i], &d->page_list);
     }
 
- out:
     spin_unlock(&d->page_alloc_lock);
-    return rc;
+    return 0;
+
+ fail:
+    spin_unlock(&d->page_alloc_lock);
+    return -1;
 }
 
 
@@ -1816,7 +1728,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
         spin_lock_recursive(&d->page_alloc_lock);
 
         for ( i = 0; i < (1 << order); i++ )
-            arch_free_heap_page(d, &pg[i]);
+            page_list_del2(&pg[i], &d->xenpage_list, &d->arch.relmem_list);
 
         d->xenheap_pages -= 1 << order;
         drop_dom_ref = (d->xenheap_pages == 0);
@@ -1835,7 +1747,7 @@ void free_domheap_pages(struct page_info *pg, unsigned int order)
             for ( i = 0; i < (1 << order); i++ )
             {
                 BUG_ON((pg[i].u.inuse.type_info & PGT_count_mask) != 0);
-                arch_free_heap_page(d, &pg[i]);
+                page_list_del2(&pg[i], &d->page_list, &d->arch.relmem_list);
             }
 
             drop_dom_ref = !domain_adjust_tot_pages(d, -(1 << order));
@@ -1928,9 +1840,15 @@ static void pagealloc_info(unsigned char key)
     printk("    Dom heap: %lukB free\n", total << (PAGE_SHIFT-10));
 }
 
+static struct keyhandler pagealloc_info_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = pagealloc_info,
+    .desc = "memory info"
+};
+
 static __init int pagealloc_keyhandler_init(void)
 {
-    register_keyhandler('m', pagealloc_info, "memory info", 1);
+    register_keyhandler('m', &pagealloc_info_keyhandler);
     return 0;
 }
 __initcall(pagealloc_keyhandler_init);
@@ -1938,16 +1856,22 @@ __initcall(pagealloc_keyhandler_init);
 
 void scrub_one_page(struct page_info *pg)
 {
+    void *p;
+
     if ( unlikely(pg->count_info & PGC_broken) )
         return;
 
+    p = __map_domain_page(pg);
+
 #ifndef NDEBUG
     /* Avoid callers relying on allocations returning zeroed pages. */
-    unmap_domain_page(memset(__map_domain_page(pg), 0xc2, PAGE_SIZE));
+    memset(p, 0xc2, PAGE_SIZE);
 #else
     /* For a production build, clear_page() is the fastest way to scrub. */
-    clear_domain_page(_mfn(page_to_mfn(pg)));
+    clear_page(p);
 #endif
+
+    unmap_domain_page(p);
 }
 
 static void dump_heap(unsigned char key)
@@ -1968,9 +1892,15 @@ static void dump_heap(unsigned char key)
     }
 }
 
+static struct keyhandler dump_heap_keyhandler = {
+    .diagnostic = 1,
+    .u.fn = dump_heap,
+    .desc = "dump heap info"
+};
+
 static __init int register_heap_trigger(void)
 {
-    register_keyhandler('H', dump_heap, "dump heap info", 1);
+    register_keyhandler('H', &dump_heap_keyhandler);
     return 0;
 }
 __initcall(register_heap_trigger);

@@ -15,8 +15,8 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-#ifndef __ASM_X86_ALTP2M_H
-#define __ASM_X86_ALTP2M_H
+#ifndef _X86_ALTP2M_H
+#define _X86_ALTP2M_H
 
 #include <xen/types.h>
 #include <xen/sched.h>         /* for struct vcpu, struct domain */
@@ -33,9 +33,5 @@ void altp2m_vcpu_initialise(struct vcpu *v);
 void altp2m_vcpu_destroy(struct vcpu *v);
 void altp2m_vcpu_reset(struct vcpu *v);
 
-static inline uint16_t altp2m_vcpu_idx(const struct vcpu *v)
-{
-    return vcpu_altp2m(v).p2midx;
-}
+#endif /* _X86_ALTP2M_H */
 
-#endif /* __ASM_X86_ALTP2M_H */

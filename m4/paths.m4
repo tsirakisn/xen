@@ -62,25 +62,11 @@ AC_ARG_WITH([sysconfig-leaf-dir],
 CONFIG_LEAF_DIR=$config_leaf_dir
 AC_SUBST(CONFIG_LEAF_DIR)
 
-dnl autoconf docs suggest to use a "package name" subdir. We make it
-dnl configurable for the benefit of those who want e.g. xen-X.Y instead.
-AC_ARG_WITH([libexec-leaf-dir],
-    AS_HELP_STRING([--with-libexec-leaf-dir=SUBDIR],
-    [Name of subdirectory in libexecdir to use.]),
-    [libexec_subdir=$withval],
-    [libexec_subdir=$PACKAGE_TARNAME])
-
 AC_ARG_WITH([xen-dumpdir],
     AS_HELP_STRING([--with-xen-dumpdir=DIR],
     [Path to directory for domU crash dumps. [LOCALSTATEDIR/lib/xen/dump]]),
     [xen_dumpdir_path=$withval],
     [xen_dumpdir_path=$localstatedir/lib/xen/dump])
-
-AC_ARG_WITH([rundir],
-    AS_HELP_STRING([--with-rundir=DIR],
-    [Path to directory for runtime data. [LOCALSTATEDIR/run]]),
-    [rundir_path=$withval],
-    [rundir_path=$localstatedir/run])
 
 if test "$libexecdir" = '${exec_prefix}/libexec' ; then
     case "$host_os" in
@@ -91,20 +77,16 @@ if test "$libexecdir" = '${exec_prefix}/libexec' ; then
     esac
 fi
 dnl expand exec_prefix or it will endup in substituted variables
-LIBEXEC=`eval echo $libexecdir/$libexec_subdir`
-AC_SUBST(LIBEXEC)
-
-dnl These variables will be substituted in various .in files
-LIBEXEC_BIN=${LIBEXEC}/bin
+libexecdir=`eval echo $libexecdir`
+dnl autoconf doc suggest to use a "package name" subdir
+dnl This variable will be substituted in various .in files
+LIBEXEC_BIN=`eval echo $libexecdir/$PACKAGE_TARNAME/bin`
 AC_SUBST(LIBEXEC_BIN)
-LIBEXEC_LIB=${LIBEXEC}/lib
-AC_SUBST(LIBEXEC_LIB)
-LIBEXEC_INC=${LIBEXEC}/include
-AC_SUBST(LIBEXEC_INC)
-XENFIRMWAREDIR=${LIBEXEC}/boot
+
+XENFIRMWAREDIR=`eval echo $libexecdir/$PACKAGE_TARNAME/boot`
 AC_SUBST(XENFIRMWAREDIR)
 
-XEN_RUN_DIR=$rundir_path/xen
+XEN_RUN_DIR=$localstatedir/run/xen
 AC_SUBST(XEN_RUN_DIR)
 
 XEN_LOG_DIR=$localstatedir/log/xen
@@ -112,12 +94,6 @@ AC_SUBST(XEN_LOG_DIR)
 
 XEN_LIB_STORED=$localstatedir/lib/xenstored
 AC_SUBST(XEN_LIB_STORED)
-
-XEN_RUN_STORED=$rundir_path/xenstored
-AC_SUBST(XEN_RUN_STORED)
-
-XEN_LIB_DIR=$localstatedir/lib/xen
-AC_SUBST(XEN_LIB_DIR)
 
 SHAREDIR=$prefix/share
 AC_SUBST(SHAREDIR)

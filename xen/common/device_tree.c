@@ -10,6 +10,7 @@
  * published by the Free Software Foundation.
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/init.h>
 #include <xen/guest_access.h>
@@ -53,7 +54,10 @@ struct dt_alias_prop {
 
 static LIST_HEAD(aliases_lookup);
 
-#ifdef CONFIG_DEVICE_TREE_DEBUG
+// #define DEBUG_DT
+
+#ifdef DEBUG_DT
+# define dt_dprintk(fmt, args...) printk(XENLOG_DEBUG fmt, ##args)
 static void dt_dump_addr(const char *s, const __be32 *addr, int na)
 {
     dt_dprintk("%s", s);
@@ -62,6 +66,7 @@ static void dt_dump_addr(const char *s, const __be32 *addr, int na)
     dt_dprintk("\n");
 }
 #else
+# define dt_dprintk(fmt, args...) do {} while ( 0 )
 static void dt_dump_addr(const char *s, const __be32 *addr, int na) { }
 #endif
 
@@ -110,13 +115,6 @@ void dt_set_range(__be32 **cellp, const struct dt_device_node *np,
 {
     dt_set_cell(cellp, dt_n_addr_cells(np), address);
     dt_set_cell(cellp, dt_n_size_cells(np), size);
-}
-
-void dt_child_set_range(__be32 **cellp, const struct dt_device_node *parent,
-                        u64 address, u64 size)
-{
-    dt_set_cell(cellp, dt_child_n_addr_cells(parent), address);
-    dt_set_cell(cellp, dt_child_n_size_cells(parent), size);
 }
 
 static void __init *unflatten_dt_alloc(unsigned long *mem, unsigned long size,
@@ -318,7 +316,7 @@ dt_match_node(const struct dt_device_match *matches,
         return NULL;
 
     while ( matches->path || matches->type ||
-            matches->compatible || matches->not_available || matches->prop)
+            matches->compatible || matches->not_available )
     {
         bool_t match = 1;
 
@@ -333,9 +331,6 @@ dt_match_node(const struct dt_device_match *matches,
 
         if ( matches->not_available )
             match &= !dt_device_is_available(node);
-
-        if ( matches->prop )
-            match &= dt_find_property(node, matches->prop, NULL) != NULL;
 
         if ( match )
             return matches;
@@ -391,15 +386,13 @@ dt_find_matching_node(struct dt_device_node *from,
     return NULL;
 }
 
-static int __dt_n_addr_cells(const struct dt_device_node *np, bool_t parent)
+int dt_n_addr_cells(const struct dt_device_node *np)
 {
     const __be32 *ip;
 
     do {
-        if ( np->parent && !parent )
+        if ( np->parent )
             np = np->parent;
-        parent = false;
-
         ip = dt_get_property(np, "#address-cells", NULL);
         if ( ip )
             return be32_to_cpup(ip);
@@ -408,41 +401,19 @@ static int __dt_n_addr_cells(const struct dt_device_node *np, bool_t parent)
     return DT_ROOT_NODE_ADDR_CELLS_DEFAULT;
 }
 
-int __dt_n_size_cells(const struct dt_device_node *np, bool_t parent)
+int dt_n_size_cells(const struct dt_device_node *np)
 {
     const __be32 *ip;
 
     do {
-        if ( np->parent && !parent )
+        if ( np->parent )
             np = np->parent;
-        parent = false;
-
         ip = dt_get_property(np, "#size-cells", NULL);
         if ( ip )
             return be32_to_cpup(ip);
     } while ( np->parent );
     /* No #address-cells property for the root node */
     return DT_ROOT_NODE_SIZE_CELLS_DEFAULT;
-}
-
-int dt_n_addr_cells(const struct dt_device_node *np)
-{
-    return __dt_n_addr_cells(np, false);
-}
-
-int dt_n_size_cells(const struct dt_device_node *np)
-{
-    return __dt_n_size_cells(np, false);
-}
-
-int dt_child_n_addr_cells(const struct dt_device_node *parent)
-{
-    return __dt_n_addr_cells(parent, true);
-}
-
-int dt_child_n_size_cells(const struct dt_device_node *parent)
-{
-    return __dt_n_size_cells(parent, true);
 }
 
 /*
@@ -1173,23 +1144,6 @@ int dt_for_each_irq_map(const struct dt_device_node *dev,
         dt_raw_irq.size = pintsize;
         for ( i = 0; i < pintsize; i++ )
             dt_raw_irq.specifier[i] = dt_read_number(imap + i, 1);
-
-        if ( dt_raw_irq.controller != dt_interrupt_controller )
-        {
-            /*
-             * We don't map IRQs connected to secondary IRQ controllers as
-             * these IRQs have no meaning to us until they connect to the
-             * primary controller.
-             *
-             * Secondary IRQ controllers will at some point connect to
-             * the primary controller (possibly via other IRQ controllers).
-             * We map the IRQs at that last connection point.
-             */
-            imap += pintsize;
-            imaplen -= pintsize;
-            dt_dprintk(" -> Skipped IRQ for secondary IRQ controller\n");
-            continue;
-        }
 
         ret = dt_irq_translate(&dt_raw_irq, &dt_irq);
         if ( ret )

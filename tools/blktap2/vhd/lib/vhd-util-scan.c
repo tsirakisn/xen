@@ -46,6 +46,7 @@
 #define VHD_SCAN_NOFAIL      0x08
 #define VHD_SCAN_VERBOSE     0x10
 #define VHD_SCAN_PARENTS     0x20
+#define VHD_SCAN_MARKERS     0x40
 
 #define VHD_TYPE_RAW_FILE    0x01
 #define VHD_TYPE_VHD_FILE    0x02
@@ -86,6 +87,8 @@ struct vhd_image {
 	uint64_t             capacity;
 	off_t                size;
 	uint8_t              hidden;
+	char		     marker;
+	struct vhd_keyhash   keyhash;
 	int                  error;
 	char                *message;
 
@@ -217,8 +220,10 @@ vhd_util_scan_pretty_add_image(struct vhd_image *image)
 	img->capacity = image->capacity;
 	img->size     = image->size;
 	img->hidden   = image->hidden;
+	img->marker   = image->marker;
 	img->error    = image->error;
 	img->message  = image->message;
+	memcpy(&img->keyhash, &image->keyhash, sizeof(img->keyhash));
 
 	img->name = strdup(image->name);
 	if (!img->name)
@@ -274,10 +279,28 @@ vhd_util_scan_print_image_indent(struct vhd_image *image, int tab)
 	if (image->error)
 		printf("%*svhd=%s scan-error=%d error-message='%s'\n",
 		       tab, pad, image->name, image->error, image->message);
-	else
+	else if (!(flags & VHD_SCAN_MARKERS))
 		printf("%*svhd=%s capacity=%"PRIu64" size=%"PRIu64" hidden=%u "
 		       "parent=%s%s\n", tab, pad, name, image->capacity,
 		       image->size, image->hidden, parent, pmsg);
+	else {
+		int i;
+		uint8_t *hash;
+		char *p, str[65];
+
+		str[0] = 0;
+		hash   = image->keyhash.hash;
+
+		if (image->keyhash.cookie)
+			for (i = 0, p = str;
+			     i < sizeof(image->keyhash.hash); i++)
+				p += sprintf(p, "%02x", hash[i]);
+
+		printf("%*svhd=%s capacity=%"PRIu64" size=%"PRIu64" hidden=%u "
+		       "marker=%u keyhash=%s parent=%s%s\n", tab, pad, name,
+		       image->capacity, image->size, image->hidden,
+		       (uint8_t)image->marker, str, parent, pmsg);
+	}
 }
 
 static void
@@ -568,6 +591,31 @@ vhd_util_scan_get_hidden(vhd_context_t *vhd, struct vhd_image *image)
 }
 
 static int
+vhd_util_scan_get_markers(vhd_context_t *vhd, struct vhd_image *image)
+{
+	int err;
+	char marker;
+	struct vhd_keyhash keyhash;
+
+	err    = 0;
+	marker = 0;
+
+	if (target_vhd(image->target->type) /* && vhd_has_batmap(vhd) */) {
+		err = vhd_marker(vhd, &marker);
+		if (err)
+			return err;
+		err = vhd_get_keyhash(vhd, &keyhash);
+		if (err)
+			return err;
+	}
+
+	image->marker = marker;
+	memcpy(&image->keyhash, &keyhash, sizeof(image->keyhash));
+
+	return err;
+}
+
+static int
 vhd_util_scan_get_size(vhd_context_t *vhd, struct vhd_image *image)
 {
 	image->size = image->target->size;
@@ -724,7 +772,7 @@ vhd_util_scan_open(vhd_context_t *vhd, struct vhd_image *image)
 	if (target_volume(image->target->type) || !(flags & VHD_SCAN_PRETTY))
 		image->name = target->name;
 	else {
-		image->name = realpath(target->name, NULL);
+		image->name = vhd_realpath(target->name, NULL);
 		if (!image->name) {
 			image->name    = target->name;
 			image->message = "resolving name";
@@ -971,6 +1019,16 @@ vhd_util_scan_targets(int cnt, struct target *targets)
 			image.message = "checking 'hidden' field";
 			image.error   = err;
 			goto end;
+		}
+
+		if (flags & VHD_SCAN_MARKERS) {
+			err = vhd_util_scan_get_markers(&vhd, &image);
+			if (err) {
+				ret           = -EAGAIN;
+				image.message = "checking markers";
+				image.error   = err;
+				goto end;
+			}
 		}
 
 		if (vhd.footer.type == HD_TYPE_DIFF) {
@@ -1235,7 +1293,7 @@ vhd_util_scan_find_targets(int cnt, char **names,
 int
 vhd_util_scan(int argc, char **argv)
 {
-	int c, ret, err, cnt;
+	int c, ret, err, cnt, markers;
 	char *filter, *volume;
 	struct target *targets;
 
@@ -1243,12 +1301,13 @@ vhd_util_scan(int argc, char **argv)
 	ret     = 0;
 	err     = 0;
 	flags   = 0;
+	markers = 0;
 	filter  = NULL;
 	volume  = NULL;
 	targets = NULL;
 
 	optind = 0;
-	while ((c = getopt(argc, argv, "m:fcl:pavh")) != -1) {
+	while ((c = getopt(argc, argv, "m:fcl:pavMh")) != -1) {
 		switch (c) {
 		case 'm':
 			filter = optarg;
@@ -1271,6 +1330,9 @@ vhd_util_scan(int argc, char **argv)
 			break;
 		case 'v':
 			flags |= VHD_SCAN_VERBOSE;
+			break;
+		case 'M':
+			flags |= VHD_SCAN_MARKERS;
 			break;
 		case 'h':
 			goto usage;
@@ -1312,6 +1374,6 @@ usage:
 	printf("usage: [OPTIONS] FILES\n"
 	       "options: [-m match filter] [-f fast] [-c continue on failure] "
 	       "[-l LVM volume] [-p pretty print] [-a scan parents] "
-	       "[-v verbose] [-h help]\n");
+	       "[-M show markers] [-v verbose] [-h help]\n");
 	return err;
 }

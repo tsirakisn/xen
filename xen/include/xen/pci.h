@@ -78,11 +78,6 @@ struct pci_dev {
     struct pci_dev_info info;
     struct arch_pci_dev arch;
     struct {
-        struct list_head list;
-        unsigned int cap_pos;
-        unsigned int queue_depth;
-    } ats;
-    struct {
         s_time_t time;
         unsigned int count;
 #define PT_FAULT_THRESHOLD 10
@@ -99,10 +94,7 @@ struct pci_dev {
  * interrupt handling related (the mask bit register).
  */
 
-void pcidevs_lock(void);
-void pcidevs_unlock(void);
-bool_t __must_check pcidevs_locked(void);
-bool_t __must_check pcidevs_trylock(void);
+extern spinlock_t pcidevs_lock;
 
 bool_t pci_known_segment(u16 seg);
 bool_t pci_device_detect(u16 seg, u8 bus, u8 dev, u8 func);
@@ -159,9 +151,6 @@ int pci_find_ext_capability(int seg, int bus, int devfn, int cap);
 int pci_find_next_ext_capability(int seg, int bus, int devfn, int pos, int cap);
 const char *parse_pci(const char *, unsigned int *seg, unsigned int *bus,
                       unsigned int *dev, unsigned int *func);
-const char *parse_pci_seg(const char *, unsigned int *seg, unsigned int *bus,
-                          unsigned int *dev, unsigned int *func, bool *def_seg);
-
 
 bool_t pcie_aer_get_firmware_first(const struct pci_dev *);
 

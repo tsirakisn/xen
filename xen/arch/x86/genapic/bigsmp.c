@@ -1,3 +1,4 @@
+#include <xen/config.h>
 #include <xen/cpumask.h>
 #include <asm/current.h>
 #include <asm/mpspec.h>

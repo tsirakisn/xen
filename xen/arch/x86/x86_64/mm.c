@@ -16,8 +16,7 @@
  * with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
-asm(".file \"" __FILE__ "\"");
-
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/init.h>
 #include <xen/mm.h>
@@ -42,6 +41,10 @@ asm(".file \"" __FILE__ "\"");
 
 unsigned int __read_mostly m2p_compat_vstart = __HYPERVISOR_COMPAT_VIRT_START;
 
+/* Enough page directories to map into the bottom 1GB. */
+l3_pgentry_t __section(".bss.page_aligned") l3_bootmap[L3_PAGETABLE_ENTRIES];
+l2_pgentry_t __section(".bss.page_aligned") l2_bootmap[L2_PAGETABLE_ENTRIES];
+
 l2_pgentry_t *compat_idle_pg_table_l2;
 
 void *do_page_walk(struct vcpu *v, unsigned long addr)
@@ -65,7 +68,7 @@ void *do_page_walk(struct vcpu *v, unsigned long addr)
     l3e = l3t[l3_table_offset(addr)];
     unmap_domain_page(l3t);
     mfn = l3e_get_pfn(l3e);
-    if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) || !mfn_valid(_mfn(mfn)) )
+    if ( !(l3e_get_flags(l3e) & _PAGE_PRESENT) || !mfn_valid(mfn) )
         return NULL;
     if ( (l3e_get_flags(l3e) & _PAGE_PSE) )
     {
@@ -77,7 +80,7 @@ void *do_page_walk(struct vcpu *v, unsigned long addr)
     l2e = l2t[l2_table_offset(addr)];
     unmap_domain_page(l2t);
     mfn = l2e_get_pfn(l2e);
-    if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) || !mfn_valid(_mfn(mfn)) )
+    if ( !(l2e_get_flags(l2e) & _PAGE_PRESENT) || !mfn_valid(mfn) )
         return NULL;
     if ( (l2e_get_flags(l2e) & _PAGE_PSE) )
     {
@@ -89,7 +92,7 @@ void *do_page_walk(struct vcpu *v, unsigned long addr)
     l1e = l1t[l1_table_offset(addr)];
     unmap_domain_page(l1t);
     mfn = l1e_get_pfn(l1e);
-    if ( !(l1e_get_flags(l1e) & _PAGE_PRESENT) || !mfn_valid(_mfn(mfn)) )
+    if ( !(l1e_get_flags(l1e) & _PAGE_PRESENT) || !mfn_valid(mfn) )
         return NULL;
 
  ret:
@@ -251,7 +254,7 @@ static void destroy_compat_m2p_mapping(struct mem_hotadd_info *info)
             }
         }
 
-        i += 1UL << (L2_PAGETABLE_SHIFT - 2);
+        i += 1UL < (L2_PAGETABLE_SHIFT - 2);
     }
 
     return;
@@ -366,7 +369,7 @@ static int setup_compat_m2p_table(struct mem_hotadd_info *info)
             continue;
 
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(i + n * PDX_GROUP_COUNT)) )
+            if ( mfn_valid(i + n * PDX_GROUP_COUNT) )
                 break;
         if ( n == CNT )
             continue;
@@ -436,7 +439,7 @@ static int setup_m2p_table(struct mem_hotadd_info *info)
         va = RO_MPT_VIRT_START + i * sizeof(*machine_to_phys_mapping);
 
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(i + n * PDX_GROUP_COUNT)) )
+            if ( mfn_valid(i + n * PDX_GROUP_COUNT) )
                 break;
         if ( n < CNT )
         {
@@ -554,7 +557,7 @@ void __init paging_init(void)
             for ( holes = k = 0; k < 1 << PAGETABLE_ORDER; ++k)
             {
                 for ( n = 0; n < CNT; ++n)
-                    if ( mfn_valid(_mfn(MFN(i + k) + n * PDX_GROUP_COUNT)) )
+                    if ( mfn_valid(MFN(i + k) + n * PDX_GROUP_COUNT) )
                         break;
                 if ( n == CNT )
                     ++holes;
@@ -587,7 +590,7 @@ void __init paging_init(void)
         }
 
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(MFN(i) + n * PDX_GROUP_COUNT)) )
+            if ( mfn_valid(MFN(i) + n * PDX_GROUP_COUNT) )
                 break;
         if ( n == CNT )
             l1_pg = NULL;
@@ -653,7 +656,7 @@ void __init paging_init(void)
         memflags = MEMF_node(phys_to_nid(i <<
             (L2_PAGETABLE_SHIFT - 2 + PAGE_SHIFT)));
         for ( n = 0; n < CNT; ++n)
-            if ( mfn_valid(_mfn(MFN(i) + n * PDX_GROUP_COUNT)) )
+            if ( mfn_valid(MFN(i) + n * PDX_GROUP_COUNT) )
                 break;
         if ( n == CNT )
             continue;
@@ -1031,39 +1034,27 @@ long do_set_segment_base(unsigned int which, unsigned long base)
     struct vcpu *v = current;
     long ret = 0;
 
-    if ( is_pv_32bit_vcpu(v) )
-        return -ENOSYS; /* x86/64 only. */
-
     switch ( which )
     {
     case SEGBASE_FS:
-        if ( is_canonical_address(base) )
-        {
-            wrfsbase(base);
-            v->arch.pv_vcpu.fs_base = base;
-        }
+        if ( wrmsr_safe(MSR_FS_BASE, base) )
+            ret = -EFAULT;
         else
-            ret = -EINVAL;
+            v->arch.pv_vcpu.fs_base = base;
         break;
 
     case SEGBASE_GS_USER:
-        if ( is_canonical_address(base) )
-        {
-            wrmsrl(MSR_SHADOW_GS_BASE, base);
-            v->arch.pv_vcpu.gs_base_user = base;
-        }
+        if ( wrmsr_safe(MSR_SHADOW_GS_BASE, base) )
+            ret = -EFAULT;
         else
-            ret = -EINVAL;
+            v->arch.pv_vcpu.gs_base_user = base;
         break;
 
     case SEGBASE_GS_KERNEL:
-        if ( is_canonical_address(base) )
-        {
-            wrgsbase(base);
-            v->arch.pv_vcpu.gs_base_kernel = base;
-        }
+        if ( wrmsr_safe(MSR_GS_BASE, base) )
+            ret = -EFAULT;
         else
-            ret = -EINVAL;
+            v->arch.pv_vcpu.gs_base_kernel = base;
         break;
 
     case SEGBASE_GS_USER_SEL:
@@ -1097,7 +1088,7 @@ int check_descriptor(const struct domain *dom, struct desc_struct *d)
 
     /* A not-present descriptor will always fault, so is safe. */
     if ( !(b & _SEGMENT_P) ) 
-        return 1;
+        goto good;
 
     /* Check and fix up the DPL. */
     dpl = (b >> 13) & 3;
@@ -1139,7 +1130,7 @@ int check_descriptor(const struct domain *dom, struct desc_struct *d)
 
     /* Invalid type 0 is harmless. It is used for 2nd half of a call gate. */
     if ( (b & _SEGMENT_TYPE) == 0x000 )
-        return 1;
+        goto good;
 
     /* Everything but a call gate is discarded here. */
     if ( (b & _SEGMENT_TYPE) != 0xc00 )
@@ -1374,9 +1365,8 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
 
     if ( !valid_numa_range(spfn << PAGE_SHIFT, epfn << PAGE_SHIFT, node) )
     {
-        printk(XENLOG_WARNING
-               "pfn range %lx..%lx PXM %x node %x is not NUMA-valid\n",
-               spfn, epfn, pxm, node);
+        dprintk(XENLOG_WARNING, "spfn %lx ~ epfn %lx pxm %x node %x"
+            "is not numa valid", spfn, epfn, pxm, node);
         return -EINVAL;
     }
 
@@ -1398,21 +1388,21 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
             goto destroy_directmap;
     }
 
-    old_node_start = node_start_pfn(node);
-    old_node_span = node_spanned_pages(node);
+    old_node_start = NODE_DATA(node)->node_start_pfn;
+    old_node_span = NODE_DATA(node)->node_spanned_pages;
     orig_online = node_online(node);
 
     if ( !orig_online )
     {
         dprintk(XENLOG_WARNING, "node %x pxm %x is not online\n",node, pxm);
+        NODE_DATA(node)->node_id = node;
         NODE_DATA(node)->node_start_pfn = spfn;
         NODE_DATA(node)->node_spanned_pages =
                 epfn - node_start_pfn(node);
         node_set_online(node);
-    }
-    else
+    }else
     {
-        if (node_start_pfn(node) > spfn)
+        if (NODE_DATA(node)->node_start_pfn > spfn)
             NODE_DATA(node)->node_start_pfn = spfn;
         if (node_end_pfn(node) < epfn)
             NODE_DATA(node)->node_spanned_pages = epfn - node_start_pfn(node);
@@ -1448,10 +1438,7 @@ int memory_add(unsigned long spfn, unsigned long epfn, unsigned int pxm)
         if ( i != epfn )
         {
             while (i-- > old_max)
-                /* If statement to satisfy __must_check. */
-                if ( iommu_unmap_page(hardware_domain, i) )
-                    continue;
-
+                iommu_unmap_page(hardware_domain, i);
             goto destroy_m2p;
         }
     }

@@ -10,6 +10,7 @@
  * Slimmed with Xen specific support.
  */
 
+#include <xen/config.h>
 #include <asm/io.h>
 #include <xen/acpi.h>
 #include <xen/errno.h>
@@ -42,70 +43,36 @@ struct acpi_sleep_info acpi_sinfo;
 
 void do_suspend_lowlevel(void);
 
-enum dev_power_saved
-{
-    SAVED_NONE,
-    SAVED_CONSOLE,
-    SAVED_TIME,
-    SAVED_I8259A,
-    SAVED_IOAPIC,
-    SAVED_IOMMU,
-    SAVED_LAPIC,
-    SAVED_ALL,
-};
-
 static int device_power_down(void)
 {
-    if ( console_suspend() )
-        return SAVED_NONE;
+    console_suspend();
 
-    if ( time_suspend() )
-        return SAVED_CONSOLE;
+    time_suspend();
 
-    if ( i8259A_suspend() )
-        return SAVED_TIME;
+    i8259A_suspend();
 
-    /* ioapic_suspend cannot fail */
     ioapic_suspend();
 
-    if ( iommu_suspend() )
-        return SAVED_IOAPIC;
+    iommu_suspend();
 
-    if ( lapic_suspend() )
-        return SAVED_IOMMU;
+    lapic_suspend();
 
-    return SAVED_ALL;
+    return 0;
 }
 
-static void device_power_up(enum dev_power_saved saved)
+static void device_power_up(void)
 {
-    switch ( saved )
-    {
-    case SAVED_ALL:
-    case SAVED_LAPIC:
-        lapic_resume();
-        /* fall through */
-    case SAVED_IOMMU:
-        iommu_resume();
-        /* fall through */
-    case SAVED_IOAPIC:
-        ioapic_resume();
-        /* fall through */
-    case SAVED_I8259A:
-        i8259A_resume();
-        /* fall through */
-    case SAVED_TIME:
-        time_resume();
-        /* fall through */
-    case SAVED_CONSOLE:
-        console_resume();
-        /* fall through */
-    case SAVED_NONE:
-        break;
-    default:
-        BUG();
-        break;
-    }
+    lapic_resume();
+
+    iommu_resume();
+
+    ioapic_resume();
+
+    i8259A_resume();
+
+    time_resume();
+
+    console_resume();
 }
 
 static void freeze_domains(void)
@@ -131,6 +98,8 @@ static void thaw_domains(void)
     for_each_domain ( d )
     {
         restore_vcpu_affinity(d);
+        if ( is_hvm_domain(d) )
+            rtc_update_clock(d);
         domain_unpause(d);
     }
     rcu_read_unlock(&domlist_read_lock);
@@ -198,16 +167,12 @@ static int enter_state(u32 state)
     local_irq_save(flags);
     spin_debug_disable();
 
-    if ( (error = device_power_down()) != SAVED_ALL )
+    if ( (error = device_power_down()) )
     {
         printk(XENLOG_ERR "Some devices failed to power down.");
         system_state = SYS_STATE_resume;
-        device_power_up(error);
-        error = -EIO;
         goto done;
     }
-    else
-        error = 0;
 
     ACPI_FLUSH_CPU_CACHE();
 
@@ -231,9 +196,10 @@ static int enter_state(u32 state)
     /* Restore CR4 and EFER from cached values. */
     cr4 = read_cr4();
     write_cr4(cr4 & ~X86_CR4_MCE);
-    write_efer(read_efer());
+    if ( cpu_has_efer )
+        write_efer(read_efer());
 
-    device_power_up(SAVED_ALL);
+    device_power_up();
 
     mcheck_init(&boot_cpu_data, 0);
     write_cr4(cr4);
@@ -305,7 +271,7 @@ int acpi_enter_sleep(struct xenpf_enter_acpi_sleep *sleep)
     else if ( sleep->val_b &&
               ((sleep->val_a ^ sleep->val_b) & ACPI_BITMASK_SLEEP_ENABLE) )
     {
-        gdprintk(XENLOG_ERR, "Mismatched pm1a/pm1b setting\n");
+        gdprintk(XENLOG_ERR, "Mismatched pm1a/pm1b setting.");
         return -EINVAL;
     }
 
@@ -360,8 +326,10 @@ static void tboot_sleep(u8 sleep_state)
     /* sizes are not same (due to packing) so copy each one */
     TB_COPY_GAS(g_tboot_shared->acpi_sinfo.pm1a_cnt_blk,
                 acpi_sinfo.pm1a_cnt_blk);
+    g_tboot_shared->acpi_sinfo.pm1a_cnt_blk.access_width = 2;
     TB_COPY_GAS(g_tboot_shared->acpi_sinfo.pm1b_cnt_blk,
                 acpi_sinfo.pm1b_cnt_blk);
+    g_tboot_shared->acpi_sinfo.pm1b_cnt_blk.access_width = 2;
     TB_COPY_GAS(g_tboot_shared->acpi_sinfo.pm1a_evt_blk,
                 acpi_sinfo.pm1a_evt_blk);
     TB_COPY_GAS(g_tboot_shared->acpi_sinfo.pm1b_evt_blk,

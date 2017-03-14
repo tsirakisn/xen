@@ -8,6 +8,7 @@
  *	later.
  */
 
+#include <xen/config.h>
 #include <xen/irq.h>
 #include <xen/sched.h>
 #include <xen/delay.h>
@@ -21,6 +22,11 @@
 #include <asm/hpet.h>
 #include <asm/hvm/support.h>
 #include <mach_apic.h>
+
+int hard_smp_processor_id(void)
+{
+    return get_apic_id();
+}
 
 /*
  * send_IPI_mask(cpumask, vector): sends @vector IPI to CPUs in @cpumask,
@@ -204,30 +210,26 @@ static unsigned int flush_flags;
 
 void invalidate_interrupt(struct cpu_user_regs *regs)
 {
-    unsigned int flags = flush_flags;
     ack_APIC_irq();
     perfc_incr(ipis);
-    if ( __sync_local_execstate() )
-        flags &= ~(FLUSH_TLB | FLUSH_TLB_GLOBAL);
-    flush_area_local(flush_va, flags);
+    if ( !__sync_local_execstate() ||
+         (flush_flags & (FLUSH_TLB_GLOBAL | FLUSH_CACHE)) )
+        flush_area_local(flush_va, flush_flags);
     cpumask_clear_cpu(smp_processor_id(), &flush_cpumask);
 }
 
 void flush_area_mask(const cpumask_t *mask, const void *va, unsigned int flags)
 {
-    unsigned int cpu = smp_processor_id();
-
     ASSERT(local_irq_is_enabled());
 
-    if ( cpumask_test_cpu(cpu, mask) )
-        flags = flush_area_local(va, flags);
+    if ( cpumask_test_cpu(smp_processor_id(), mask) )
+        flush_area_local(va, flags);
 
-    if ( (flags & ~FLUSH_ORDER_MASK) &&
-         !cpumask_subset(mask, cpumask_of(cpu)) )
+    if ( !cpumask_subset(mask, cpumask_of(smp_processor_id())) )
     {
         spin_lock(&flush_lock);
         cpumask_and(&flush_cpumask, mask, &cpu_online_map);
-        cpumask_clear_cpu(cpu, &flush_cpumask);
+        cpumask_clear_cpu(smp_processor_id(), &flush_cpumask);
         flush_va      = va;
         flush_flags   = flags;
         send_IPI_mask(&flush_cpumask, INVALIDATE_TLB_VECTOR);
@@ -301,10 +303,6 @@ static void stop_this_cpu(void *dummy)
 void smp_send_stop(void)
 {
     int timeout = 10;
-
-    local_irq_disable();
-    fixup_irqs(cpumask_of(smp_processor_id()), 0);
-    local_irq_enable();
 
     smp_call_function(stop_this_cpu, NULL, 0);
 

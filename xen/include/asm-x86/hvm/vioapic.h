@@ -24,6 +24,7 @@
 #ifndef __ASM_X86_HVM_VIOAPIC_H__
 #define __ASM_X86_HVM_VIOAPIC_H__
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/smp.h>
 #include <public/hvm/save.h>

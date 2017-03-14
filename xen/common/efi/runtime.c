@@ -8,31 +8,16 @@
 
 DEFINE_XEN_GUEST_HANDLE(CHAR16);
 
-struct efi_rs_state {
-#ifdef CONFIG_X86
- /*
-  * The way stacks get set up leads to them always being on an 8-byte
-  * boundary not evenly divisible by 16 (see asm-x86/current.h). The EFI ABI,
-  * just like the CPU one, however requires stacks to be 16-byte aligned
-  * before every function call. Since the compiler assumes this (unless
-  * passing it -mpreferred-stack-boundary=3), it wouldn't generate code to
-  * align the stack to 16 bytes even if putting a 16-byte aligned object
-  * there. Hence we need to force larger than 16-byte alignment, even if we
-  * don't strictly need that.
-  */
- unsigned long __aligned(32) cr3;
-#endif
-};
-
-struct efi_rs_state efi_rs_enter(void);
-void efi_rs_leave(struct efi_rs_state *);
-
 #ifndef COMPAT
 
-#ifndef CONFIG_ARM
+#ifdef CONFIG_ARM  /* Disabled until runtime services implemented */
+const bool_t efi_enabled = 0;
+#else
 # include <asm/i387.h>
 # include <asm/xstate.h>
 # include <public/platform.h>
+
+const bool_t efi_enabled = 1;
 #endif
 
 unsigned int __read_mostly efi_num_ct;
@@ -56,9 +41,6 @@ UINT64 __read_mostly efi_boot_max_var_store_size;
 UINT64 __read_mostly efi_boot_remain_var_store_size;
 UINT64 __read_mostly efi_boot_max_var_size;
 
-/* Bit field representing available EFI features/properties. */
-unsigned int efi_flags;
-
 struct efi __read_mostly efi = {
 	.acpi   = EFI_INVALID_TABLE_ADDR,
 	.acpi20 = EFI_INVALID_TABLE_ADDR,
@@ -69,25 +51,18 @@ struct efi __read_mostly efi = {
 
 const struct efi_pci_rom *__read_mostly efi_pci_roms;
 
-bool efi_enabled(unsigned int feature)
-{
-    return test_bit(feature, &efi_flags);
-}
-
 #ifndef CONFIG_ARM /* TODO - disabled until implemented on ARM */
-
-struct efi_rs_state efi_rs_enter(void)
+unsigned long efi_rs_enter(void)
 {
     static const u16 fcw = FCW_DEFAULT;
     static const u32 mxcsr = MXCSR_DEFAULT;
-    struct efi_rs_state state = { .cr3 = 0 };
+    unsigned long cr3 = read_cr3();
 
     if ( !efi_l4_pgtable )
-        return state;
+        return 0;
 
-    state.cr3 = read_cr3();
     save_fpu_enable();
-    asm volatile ( "fnclex; fldcw %0" :: "m" (fcw) );
+    asm volatile ( "fldcw %0" :: "m" (fcw) );
     asm volatile ( "ldmxcsr %0" :: "m" (mxcsr) );
 
     spin_lock(&efi_rs_lock);
@@ -110,14 +85,14 @@ struct efi_rs_state efi_rs_enter(void)
 
     write_cr3(virt_to_maddr(efi_l4_pgtable));
 
-    return state;
+    return cr3;
 }
 
-void efi_rs_leave(struct efi_rs_state *state)
+void efi_rs_leave(unsigned long cr3)
 {
-    if ( !state->cr3 )
+    if ( !cr3 )
         return;
-    write_cr3(state->cr3);
+    write_cr3(cr3);
     if ( is_pv_vcpu(current) && !is_idle_vcpu(current) )
     {
         struct desc_ptr gdt_desc = {
@@ -144,15 +119,14 @@ unsigned long efi_get_time(void)
 {
     EFI_TIME time;
     EFI_STATUS status;
-    struct efi_rs_state state = efi_rs_enter();
-    unsigned long flags;
+    unsigned long cr3 = efi_rs_enter(), flags;
 
-    if ( !state.cr3 )
+    if ( !cr3 )
         return 0;
     spin_lock_irqsave(&rtc_lock, flags);
     status = efi_rs->GetTime(&time, NULL);
     spin_unlock_irqrestore(&rtc_lock, flags);
-    efi_rs_leave(&state);
+    efi_rs_leave(cr3);
 
     if ( EFI_ERROR(status) )
         return 0;
@@ -164,12 +138,12 @@ unsigned long efi_get_time(void)
 void efi_halt_system(void)
 {
     EFI_STATUS status;
-    struct efi_rs_state state = efi_rs_enter();
+    unsigned long cr3 = efi_rs_enter();
 
-    if ( !state.cr3 )
+    if ( !cr3 )
         return;
     status = efi_rs->ResetSystem(EfiResetShutdown, EFI_SUCCESS, 0, NULL);
-    efi_rs_leave(&state);
+    efi_rs_leave(cr3);
 
     printk(XENLOG_WARNING "EFI: could not halt system (%#lx)\n", status);
 }
@@ -177,13 +151,13 @@ void efi_halt_system(void)
 void efi_reset_system(bool_t warm)
 {
     EFI_STATUS status;
-    struct efi_rs_state state = efi_rs_enter();
+    unsigned long cr3 = efi_rs_enter();
 
-    if ( !state.cr3 )
+    if ( !cr3 )
         return;
     status = efi_rs->ResetSystem(warm ? EfiResetWarm : EfiResetCold,
                                  EFI_SUCCESS, 0, NULL);
-    efi_rs_leave(&state);
+    efi_rs_leave(cr3);
 
     printk(XENLOG_WARNING "EFI: could not reset system (%#lx)\n", status);
 }
@@ -196,9 +170,6 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
 {
     unsigned int i, n;
 
-    if ( !efi_enabled(EFI_BOOT) )
-        return -ENOSYS;
-
     switch ( idx )
     {
     case XEN_FW_EFI_VERSION:
@@ -206,12 +177,12 @@ int efi_get_info(uint32_t idx, union xenpf_efi_info *info)
         break;
     case XEN_FW_EFI_RT_VERSION:
     {
-        struct efi_rs_state state = efi_rs_enter();
+        unsigned long cr3 = efi_rs_enter();
 
-        if ( !state.cr3 )
+        if ( !cr3 )
             return -EOPNOTSUPP;
         info->version = efi_rs->Hdr.Revision;
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
         break;
     }
     case XEN_FW_EFI_CONFIG_TABLE:
@@ -329,16 +300,9 @@ static inline EFI_GUID *cast_guid(struct xenpf_efi_guid *guid)
 
 int efi_runtime_call(struct xenpf_efi_runtime_call *op)
 {
-    struct efi_rs_state state;
-    unsigned long flags;
+    unsigned long cr3, flags;
     EFI_STATUS status = EFI_NOT_STARTED;
     int rc = 0;
-
-    if ( !efi_enabled(EFI_BOOT) )
-        return -ENOSYS;
-
-    if ( !efi_enabled(EFI_RS) )
-        return -EOPNOTSUPP;
 
     switch ( op->function )
     {
@@ -349,13 +313,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 )
             return -EOPNOTSUPP;
         spin_lock_irqsave(&rtc_lock, flags);
         status = efi_rs->GetTime(cast_time(&op->u.get_time.time), &caps);
         spin_unlock_irqrestore(&rtc_lock, flags);
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
 
         if ( !EFI_ERROR(status) )
         {
@@ -371,13 +335,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 )
             return -EOPNOTSUPP;
         spin_lock_irqsave(&rtc_lock, flags);
         status = efi_rs->SetTime(cast_time(&op->u.set_time));
         spin_unlock_irqrestore(&rtc_lock, flags);
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
         break;
 
     case XEN_EFI_get_wakeup_time:
@@ -387,14 +351,14 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 )
             return -EOPNOTSUPP;
         spin_lock_irqsave(&rtc_lock, flags);
         status = efi_rs->GetWakeupTime(&enabled, &pending,
                                        cast_time(&op->u.get_wakeup_time));
         spin_unlock_irqrestore(&rtc_lock, flags);
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
 
         if ( !EFI_ERROR(status) )
         {
@@ -411,8 +375,8 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
                           XEN_EFI_SET_WAKEUP_TIME_ENABLE_ONLY) )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 )
             return -EOPNOTSUPP;
         spin_lock_irqsave(&rtc_lock, flags);
         status = efi_rs->SetWakeupTime(!!(op->misc &
@@ -422,7 +386,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
                                        NULL :
                                        cast_time(&op->u.set_wakeup_time));
         spin_unlock_irqrestore(&rtc_lock, flags);
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
 
         op->misc = 0;
         break;
@@ -431,12 +395,12 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( cr3 )
             status = efi_rs->GetNextHighMonotonicCount(&op->misc);
         else
             rc = -EOPNOTSUPP;
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
         break;
 
     case XEN_EFI_get_variable:
@@ -470,13 +434,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         else
             data = NULL;
 
-        state = efi_rs_enter();
-        if ( state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( cr3 )
         {
             status = efi_rs->GetVariable(
                 name, cast_guid(&op->u.get_variable.vendor_guid),
                 &op->misc, &size, data);
-            efi_rs_leave(&state);
+            efi_rs_leave(cr3);
 
             if ( !EFI_ERROR(status) &&
                  copy_to_guest(op->u.get_variable.data, data, size) )
@@ -513,14 +477,14 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             rc = -EFAULT;
         else
         {
-            state = efi_rs_enter();
-            if ( state.cr3 )
+            cr3 = efi_rs_enter();
+            if ( cr3 )
                 status = efi_rs->SetVariable(
                     name, cast_guid(&op->u.set_variable.vendor_guid),
                     op->misc, op->u.set_variable.size, data);
             else
                 rc = -EOPNOTSUPP;
-            efi_rs_leave(&state);
+            efi_rs_leave(cr3);
         }
 
         xfree(data);
@@ -550,13 +514,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             return -EFAULT;
         }
 
-        state = efi_rs_enter();
-        if ( state.cr3 )
+        cr3 = efi_rs_enter();
+        if ( cr3 )
         {
             status = efi_rs->GetNextVariableName(
                 &size, name.str,
                 cast_guid(&op->u.get_next_variable_name.vendor_guid));
-            efi_rs_leave(&state);
+            efi_rs_leave(cr3);
 
             /*
              * Copy the variable name if necessary. The caller provided size
@@ -605,10 +569,10 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             break;
         }
 
-        state = efi_rs_enter();
-        if ( !state.cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
         {
-            efi_rs_leave(&state);
+            efi_rs_leave(cr3);
             return -EOPNOTSUPP;
         }
         status = efi_rs->QueryVariableInfo(
@@ -616,7 +580,7 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
             &op->u.query_variable_info.max_store_size,
             &op->u.query_variable_info.remain_store_size,
             &op->u.query_variable_info.max_size);
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
         break;
 
     case XEN_EFI_query_capsule_capabilities:
@@ -624,13 +588,13 @@ int efi_runtime_call(struct xenpf_efi_runtime_call *op)
         if ( op->misc )
             return -EINVAL;
 
-        state = efi_rs_enter();
-        if ( !state.cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
+        cr3 = efi_rs_enter();
+        if ( !cr3 || (efi_rs->Hdr.Revision >> 16) < 2 )
         {
-            efi_rs_leave(&state);
+            efi_rs_leave(cr3);
             return -EOPNOTSUPP;
         }
-        efi_rs_leave(&state);
+        efi_rs_leave(cr3);
         /* XXX fall through for now */
     default:
         return -ENOSYS;

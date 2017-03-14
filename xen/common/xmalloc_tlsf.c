@@ -23,6 +23,7 @@
  * Adapted for Xen by Dan Magenheimer (dan.magenheimer@oracle.com)
  */
 
+#include <xen/config.h>
 #include <xen/irq.h>
 #include <xen/mm.h>
 #include <xen/pfn.h>
@@ -176,7 +177,7 @@ static inline void MAPPING_INSERT(unsigned long r, int *fl, int *sl)
 static inline struct bhdr *FIND_SUITABLE_BLOCK(struct xmem_pool *p, int *fl,
                                                int *sl)
 {
-    u32 tmp = p->sl_bitmap[*fl] & (~0u << *sl);
+    u32 tmp = p->sl_bitmap[*fl] & (~0 << *sl);
     struct bhdr *b = NULL;
 
     if ( tmp )
@@ -186,7 +187,7 @@ static inline struct bhdr *FIND_SUITABLE_BLOCK(struct xmem_pool *p, int *fl,
     }
     else
     {
-        *fl = ffs(p->fl_bitmap & (~0u << (*fl + 1))) - 1;
+        *fl = ffs(p->fl_bitmap & (~0 << (*fl + 1))) - 1;
         if ( likely(*fl > 0) )
         {
             *sl = ffs(p->sl_bitmap[*fl]) - 1;

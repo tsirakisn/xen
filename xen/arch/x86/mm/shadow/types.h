@@ -250,6 +250,7 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_detach_old_tables       INTERNAL_NAME(sh_detach_old_tables)
 #define sh_x86_emulate_write       INTERNAL_NAME(sh_x86_emulate_write)
 #define sh_x86_emulate_cmpxchg     INTERNAL_NAME(sh_x86_emulate_cmpxchg)
+#define sh_x86_emulate_cmpxchg8b   INTERNAL_NAME(sh_x86_emulate_cmpxchg8b)
 #define sh_audit_l1_table          INTERNAL_NAME(sh_audit_l1_table)
 #define sh_audit_fl1_table         INTERNAL_NAME(sh_audit_fl1_table)
 #define sh_audit_l2_table          INTERNAL_NAME(sh_audit_l2_table)
@@ -264,14 +265,17 @@ static inline shadow_l4e_t shadow_l4e_from_mfn(mfn_t mfn, u32 flags)
 #define sh_rm_write_access_from_sl1p INTERNAL_NAME(sh_rm_write_access_from_sl1p)
 #endif
 
+/* The sh_guest_(map|get)_* functions depends on Xen's paging levels */
+#define sh_guest_map_l1e \
+        SHADOW_INTERNAL_NAME(sh_guest_map_l1e, CONFIG_PAGING_LEVELS)
+#define sh_guest_get_eff_l1e \
+        SHADOW_INTERNAL_NAME(sh_guest_get_eff_l1e, CONFIG_PAGING_LEVELS)
+
 /* sh_make_monitor_table depends only on the number of shadow levels */
 #define sh_make_monitor_table \
-        SHADOW_SH_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
+        SHADOW_INTERNAL_NAME(sh_make_monitor_table, SHADOW_PAGING_LEVELS)
 #define sh_destroy_monitor_table \
-        SHADOW_SH_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
-
-mfn_t sh_make_monitor_table(struct vcpu *v);
-void sh_destroy_monitor_table(struct vcpu *v, mfn_t mmfn);
+        SHADOW_INTERNAL_NAME(sh_destroy_monitor_table, SHADOW_PAGING_LEVELS)
 
 #if SHADOW_PAGING_LEVELS == 3
 #define MFN_FITS_IN_HVM_CR3(_MFN) !(mfn_x(_MFN) >> 20)

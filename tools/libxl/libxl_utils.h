@@ -25,6 +25,9 @@ char *libxl_basename(const char *name); /* returns string from strdup */
 
 unsigned long libxl_get_required_shadow_memory(unsigned long maxmem_kb, unsigned int smp_cpus);
 int libxl_name_to_domid(libxl_ctx *ctx, const char *name, uint32_t *domid);
+int libxl_uuid_to_domid(libxl_ctx *ctx, const char *uuid, int32_t *domid);
+int libxl_domid_to_uuid(libxl_ctx *ctx, libxl_uuid *uuid, uint32_t domid);
+int libxl_get_acpi_state(libxl_ctx *ctx, int32_t domid, uint32_t * acpi_state);
 int libxl_domain_qualifier_to_domid(libxl_ctx *ctx, const char *name, uint32_t *domid);
 char *libxl_domid_to_name(libxl_ctx *ctx, uint32_t domid);
 int libxl_cpupool_qualifier_to_cpupoolid(libxl_ctx *ctx, const char *p,
@@ -37,6 +40,10 @@ int libxl_get_stubdom_id(libxl_ctx *ctx, int guest_domid);
 int libxl_is_stubdom(libxl_ctx *ctx, uint32_t domid, uint32_t *target_domid);
 int libxl_create_logfile(libxl_ctx *ctx, const char *name, char **full_name);
 int libxl_string_to_backend(libxl_ctx *ctx, char *s, libxl_disk_backend *backend);
+int libxl_update_state(libxl_ctx *ctx, uint32_t domid_in, const char *state);
+int libxl_read_reboot(libxl_ctx *ctx, uint32_t domid_in, char **reboot);
+int libxl_set_reboot(libxl_ctx *ctx, uint32_t domid_in, bool reboot);
+int libxl_update_state_direct(libxl_ctx *ctx, libxl_uuid xl_uuid, const char *state);
 
 int libxl_read_file_contents(libxl_ctx *ctx, const char *filename,
                              void **data_r, int *datalen_r);
@@ -76,11 +83,6 @@ int libxl_uuid_to_device_vtpm(libxl_ctx *ctx, uint32_t domid,
                                libxl_uuid *uuid, libxl_device_vtpm *vtpm);
 int libxl_devid_to_device_vtpm(libxl_ctx *ctx, uint32_t domid,
                                int devid, libxl_device_vtpm *vtpm);
-int libxl_devid_to_device_usbctrl(libxl_ctx *ctx, uint32_t domid,
-                                  int devid, libxl_device_usbctrl *usbctrl);
-int libxl_ctrlport_to_device_usbdev(libxl_ctx *ctx, uint32_t domid,
-                                    int ctrl, int port,
-                                    libxl_device_usbdev *usbdev);
 
 int libxl_bitmap_alloc(libxl_ctx *ctx, libxl_bitmap *bitmap, int n_bits);
     /* Allocated bimap is from malloc, libxl_bitmap_dispose() to be
@@ -167,10 +169,12 @@ int libxl_cpumap_to_nodemap(libxl_ctx *ctx,
     return (s + 1023) / 1024;
 }
 
-void libxl_string_copy(libxl_ctx *ctx, char **dst, char * const*src);
+void libxl_string_copy(libxl_ctx *ctx, char **dst, char **src);
 
 
 #define LIBXL_FILLZERO(object) (memset(&(object), 0, sizeof((object))))
+
+#define INVALID_ACPI_STATE ~0
 
 #endif
 

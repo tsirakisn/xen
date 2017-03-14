@@ -1,7 +1,7 @@
 /******************************************************************************
  * privcmd.h
  *
- * Interface to /dev/xen/privcmd.
+ * Interface to /proc/xen/privcmd.
  *
  * Copyright (c) 2003-2005, K A Fraser
  *

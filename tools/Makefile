@@ -3,10 +3,8 @@ include $(XEN_ROOT)/tools/Rules.mk
 
 SUBDIRS-y :=
 SUBDIRS-y += include
-SUBDIRS-y += libs
 SUBDIRS-y += libxc
-SUBDIRS-y += flask
-SUBDIRS-y += fuzz
+SUBDIRS-$(FLASK_ENABLE) += flask
 SUBDIRS-y += xenstore
 SUBDIRS-y += misc
 SUBDIRS-y += examples
@@ -22,6 +20,7 @@ SUBDIRS-$(CONFIG_BLKTAP2) += blktap2
 SUBDIRS-$(CONFIG_NetBSD) += xenbackendd
 SUBDIRS-y += libfsimage
 SUBDIRS-$(CONFIG_Linux) += libvchan
+SUBDIRS-$(CONFIG_X86) += xen-libhvm
 
 # do not recurse in to a dir we are about to delete
 ifneq "$(MAKECMDGOALS)" "distclean"
@@ -31,8 +30,6 @@ endif
 
 SUBDIRS-y += xenpmd
 SUBDIRS-y += libxl
-SUBDIRS-y += xl
-SUBDIRS-y += helpers
 SUBDIRS-$(CONFIG_X86) += xenpaging
 SUBDIRS-$(CONFIG_X86) += debugger/gdbsx
 SUBDIRS-$(CONFIG_X86) += debugger/kdd
@@ -62,11 +59,9 @@ build all: subdirs-all
 
 .PHONY: install
 install: subdirs-install
-	$(INSTALL_DIR) -m 700 $(DESTDIR)$(XEN_DUMP_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_LOG_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_LIB_DIR)
-	$(INSTALL_DIR) $(DESTDIR)$(XEN_RUN_STORED)
+	$(INSTALL_DIR) $(DESTDIR)$(XEN_DUMP_DIR)
+	$(INSTALL_DIR) $(DESTDIR)/var/log/xen
+	$(INSTALL_DIR) $(DESTDIR)/var/lib/xen
 
 .PHONY: uninstall
 uninstall: D=$(DESTDIR)
@@ -79,9 +74,7 @@ uninstall:
 	rm -f  $(D)$(SYSCONFIG_DIR)/xendomains
 	rm -f  $(D)$(sbindir)/xendomains
 	rm -f  $(D)$(SYSCONFIG_DIR)/xencommons
-	rm -rf $(D)$(XEN_LIB_DIR)
-	rm -rf $(D)$(XEN_LIB_STORED)
-	rm -rf $(D)$(XEN_RUN_STORED)
+	rm -rf $(D)/var/lib/xen*
 	rm -rf $(D)$(bindir)/cpuperf-perfcntr $(D)$(bindir)/cpuperf-xen
 	rm -rf $(D)$(bindir)/xc_shadow
 	rm -rf $(D)$(bindir)/pygrub
@@ -111,12 +104,11 @@ uninstall:
 
 .PHONY: clean
 clean: subdirs-clean
-	rm -rf pkg-config
 
 .PHONY: distclean
-distclean: subdirs-distclean clean
+distclean: subdirs-distclean
 	rm -rf qemu-xen-traditional-dir qemu-xen-traditional-dir-remote
-	rm -rf qemu-xen-dir qemu-xen-dir-remote qemu-xen-build
+	rm -rf qemu-xen-dir qemu-xen-dir-remote
 	rm -rf ../config/Tools.mk config.h config.log config.status \
 		config.cache autom4te.cache
 
@@ -191,25 +183,28 @@ qemu-xen-traditional-dir-force-update: qemu-xen-traditional-dir-find
 		$(GIT) reset --hard $(QEMU_TRADITIONAL_REVISION); \
 	fi
 
-qemu-traditional-recurse = \
+subdir-all-qemu-xen-traditional-dir: qemu-xen-traditional-dir-find
 	set -e; \
 		$(buildmakevars2shellvars); \
 		export CONFIG_BLKTAP1=n; \
 		cd qemu-xen-traditional-dir; \
-		$(1)
-
-subdir-all-qemu-xen-traditional-dir: qemu-xen-traditional-dir-find
-	$(call qemu-traditional-recurse,\
 		$(QEMU_ROOT)/xen-setup \
-		--extra-cflags="-D__XEN_TOOLS__ $(EXTRA_CFLAGS_QEMU_TRADITIONAL)" \
 		$(IOEMU_EXTRA_LDFLAGS) \
 		--cpu=$(IOEMU_CPU_ARCH) \
 		$(IOEMU_CONFIGURE_CROSS); \
-		$(MAKE) all \
-	)
+		$(MAKE) all
 
-subdir-install-qemu-xen-traditional-dir: subdir-all-qemu-xen-traditional-dir
-	$(call qemu-traditional-recurse,$(MAKE) install)
+subdir-install-qemu-xen-traditional-dir: qemu-xen-traditional-dir-find
+	set -e; \
+		$(buildmakevars2shellvars); \
+		export CONFIG_BLKTAP1=n; \
+		cd qemu-xen-traditional-dir; \
+		$(QEMU_ROOT)/xen-setup \
+		--extra-cflags="$(EXTRA_CFLAGS_QEMU_TRADITIONAL)" \
+		$(IOEMU_EXTRA_LDFLAGS) \
+		--cpu=$(IOEMU_CPU_ARCH) \
+		$(IOEMU_CONFIGURE_CROSS); \
+		$(MAKE) install
 
 subdir-clean-qemu-xen-traditional-dir:
 	set -e; if test -d qemu-xen-traditional-dir/.; then \
@@ -235,7 +230,7 @@ qemu-xen-dir-force-update: qemu-xen-dir-find
 	fi
 
 ifeq ($(debug),y)
-QEMU_XEN_ENABLE_DEBUG := --enable-debug
+QEMU_XEN_ENABLE_DEBUG := --enable-debug --enable-trace-backend=stderr
 else
 QEMU_XEN_ENABLE_DEBUG :=
 endif
@@ -244,51 +239,22 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	if test -d $(QEMU_UPSTREAM_LOC) ; then \
 		source=$(QEMU_UPSTREAM_LOC); \
 	else \
-		source=$(XEN_ROOT)/tools/qemu-xen-dir; \
+		source=.; \
 	fi; \
-	mkdir -p qemu-xen-build; \
-	cd qemu-xen-build; \
-	if $$source/scripts/tracetool.py --check-backend --backend log ; then \
-		enable_trace_backend='--enable-trace-backend=log'; \
-	elif $$source/scripts/tracetool.py --check-backend --backend stderr ; then \
-		enable_trace_backend='--enable-trace-backend=stderr'; \
-	else \
-		enable_trace_backend='' ; \
-	fi ; \
-	PKG_CONFIG_PATH=$(XEN_ROOT)/tools/pkg-config \
+	cd qemu-xen-dir; \
 	$$source/configure --enable-xen --target-list=i386-softmmu \
 		$(QEMU_XEN_ENABLE_DEBUG) \
-		$$enable_trace_backend \
 		--prefix=$(LIBEXEC) \
 		--libdir=$(LIBEXEC_LIB) \
 		--includedir=$(LIBEXEC_INC) \
 		--source-path=$$source \
-		--extra-cflags="-DXC_WANT_COMPAT_EVTCHN_API=1 \
-		-DXC_WANT_COMPAT_GNTTAB_API=1 \
-		-DXC_WANT_COMPAT_MAP_FOREIGN_API=1 \
-		-DXC_WANT_COMPAT_DEVICEMODEL_API=1 \
-		-I$(XEN_ROOT)/tools/include \
-		-I$(XEN_ROOT)/tools/libs/toollog/include \
-		-I$(XEN_ROOT)/tools/libs/evtchn/include \
-		-I$(XEN_ROOT)/tools/libs/gnttab/include \
-		-I$(XEN_ROOT)/tools/libs/foreignmemory/include \
-		-I$(XEN_ROOT)/tools/libs/devicemodel/include \
+		--extra-cflags="-I$(XEN_ROOT)/tools/include \
 		-I$(XEN_ROOT)/tools/libxc/include \
 		-I$(XEN_ROOT)/tools/xenstore/include \
 		-I$(XEN_ROOT)/tools/xenstore/compat/include \
 		$(EXTRA_CFLAGS_QEMU_XEN)" \
 		--extra-ldflags="-L$(XEN_ROOT)/tools/libxc \
 		-L$(XEN_ROOT)/tools/xenstore \
-		-L$(XEN_ROOT)/tools/libs/evtchn \
-		-L$(XEN_ROOT)/tools/libs/gnttab \
-		-L$(XEN_ROOT)/tools/libs/foreignmemory \
-		-L$(XEN_ROOT)/tools/libs/devicemodel \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/toollog \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/evtchn \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/gnttab \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/call \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/foreignmemory \
-		-Wl,-rpath-link=$(XEN_ROOT)/tools/libs/devicemodel \
 		$(QEMU_UPSTREAM_RPATH)" \
 		--bindir=$(LIBEXEC_BIN) \
 		--datadir=$(SHAREDIR)/qemu-xen \
@@ -303,12 +269,12 @@ subdir-all-qemu-xen-dir: qemu-xen-dir-find
 	$(MAKE) all
 
 subdir-install-qemu-xen-dir: subdir-all-qemu-xen-dir
-	cd qemu-xen-build; \
+	cd qemu-xen-dir; \
 	$(MAKE) install
 
 subdir-clean-qemu-xen-dir:
-	set -e; if test -d qemu-xen-build/.; then \
-		$(MAKE) -C qemu-xen-build clean; \
+	set -e; if test -d qemu-xen-dir/.; then \
+		$(MAKE) -C qemu-xen-dir clean; \
 	fi
 
 subdir-clean-debugger/gdbsx subdir-distclean-debugger/gdbsx: .phony

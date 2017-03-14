@@ -1,6 +1,7 @@
 #ifndef __ASM_DOMAIN_H__
 #define __ASM_DOMAIN_H__
 
+#include <xen/config.h>
 #include <xen/cache.h>
 #include <xen/sched.h>
 #include <asm/page.h>
@@ -14,7 +15,8 @@
 struct hvm_domain
 {
     uint64_t              params[HVM_NR_PARAMS];
-};
+    bool_t                introspection_enabled;
+}  __cacheline_aligned;
 
 #ifdef CONFIG_ARM_64
 enum domain_type {
@@ -47,12 +49,12 @@ struct arch_domain
 
     /* Virtual MMU */
     struct p2m_domain p2m;
+    uint64_t vttbr;
 
     struct hvm_domain hvm_domain;
-    gfn_t *grant_table_gfn;
+    xen_pfn_t *grant_table_gpfn;
 
-    struct vmmio vmmio;
-
+    struct io_handler io_handlers;
     /* Continuable domain_relinquish_resources(). */
     enum {
         RELMEM_not_started,
@@ -87,7 +89,7 @@ struct arch_domain
          * rank order.
          */
         spinlock_t lock;
-        uint32_t ctlr;
+        int ctlr;
         int nr_spis; /* Number of SPIs */
         unsigned long *allocated_irqs; /* bitmap of IRQs allocated */
         struct vgic_irq_rank *shared_irqs;
@@ -98,14 +100,15 @@ struct arch_domain
         struct pending_irq *pending_irqs;
         /* Base address for guest GIC */
         paddr_t dbase; /* Distributor base address */
-#ifdef CONFIG_HAS_GICV3
+        paddr_t cbase; /* CPU base address */
+#ifdef HAS_GICV3
         /* GIC V3 addressing */
         /* List of contiguous occupied by the redistributors */
         struct vgic_rdist_region {
             paddr_t base;                   /* Base address */
             paddr_t size;                   /* Size */
             unsigned int first_cpu;         /* First CPU handled */
-        } *rdist_regions;
+        } rdist_regions[MAX_RDIST_COUNT];
         int nr_regions;                     /* Number of rdist regions */
         uint32_t rdist_stride;              /* Re-Distributor stride */
 #endif
@@ -120,16 +123,6 @@ struct arch_domain
     } vuart;
 
     unsigned int evtchn_irq;
-#ifdef CONFIG_ACPI
-    void *efi_acpi_table;
-    paddr_t efi_acpi_gpa;
-    paddr_t efi_acpi_len;
-#endif
-
-    /* Monitor options */
-    struct {
-        uint8_t privileged_call_enabled : 1;
-    } monitor;
 }  __cacheline_aligned;
 
 struct arch_vcpu
@@ -305,18 +298,6 @@ static inline register_t vcpuid_to_vaffinity(unsigned int vcpuid)
 
     return vaff;
 }
-
-static inline struct vcpu_guest_context *alloc_vcpu_guest_context(void)
-{
-    return xmalloc(struct vcpu_guest_context);
-}
-
-static inline void free_vcpu_guest_context(struct vcpu_guest_context *vgc)
-{
-    xfree(vgc);
-}
-
-static inline void arch_vcpu_block(struct vcpu *v) {}
 
 #endif /* __ASM_DOMAIN_H__ */
 

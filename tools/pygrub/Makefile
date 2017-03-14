@@ -2,8 +2,7 @@
 XEN_ROOT = $(CURDIR)/../..
 include $(XEN_ROOT)/tools/Rules.mk
 
-PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS)
-PY_LDFLAGS = $(LDFLAGS) $(APPEND_LDFLAGS)
+PY_CFLAGS = $(CFLAGS) $(PY_NOOPT_CFLAGS) $(APPEND_LDFLAGS)
 
 .PHONY: all
 all: build
@@ -13,8 +12,8 @@ build:
 
 .PHONY: install
 install: all
-	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" LDFLAGS="$(PY_LDFLAGS)" $(PYTHON) \
-		setup.py install $(PYTHON_PREFIX_ARG) --root="$(DESTDIR)"  \
+	CC="$(CC)" CFLAGS="$(PY_CFLAGS)" $(PYTHON) setup.py install \
+		$(PYTHON_PREFIX_ARG) --root="$(DESTDIR)" \
 		--install-scripts=$(LIBEXEC_BIN) --force
 	set -e; if [ $(bindir) != $(LIBEXEC_BIN) -a \
 	             "`readlink -f $(DESTDIR)/$(bindir)`" != \

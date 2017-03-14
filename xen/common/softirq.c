@@ -9,6 +9,7 @@
  * Copyright (c) 1992, Linus Torvalds
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/preempt.h>

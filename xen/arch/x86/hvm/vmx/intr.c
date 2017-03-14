@@ -16,13 +16,13 @@
  * this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/mm.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
 #include <xen/trace.h>
 #include <xen/event.h>
-#include <asm/apicdef.h>
 #include <asm/current.h>
 #include <asm/cpufeature.h>
 #include <asm/processor.h>
@@ -67,7 +67,7 @@
  * the STI- and MOV-SS-blocking interruptibility-state flags.
  */
 
-static void vmx_enable_intr_window(struct vcpu *v, struct hvm_intack intack)
+static void enable_intr_window(struct vcpu *v, struct hvm_intack intack)
 {
     u32 ctl = CPU_BASED_VIRTUAL_INTR_PENDING;
 
@@ -182,7 +182,7 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
 
     if ( nvmx_intr_blocked(v) != hvm_intblk_none )
     {
-        vmx_enable_intr_window(v, intack);
+        enable_intr_window(v, intack);
         return 1;
     }
 
@@ -191,13 +191,13 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
         if ( intack.source == hvm_intsrc_pic ||
                  intack.source == hvm_intsrc_lapic )
         {
-            ctrl = get_vvmcs(v, PIN_BASED_VM_EXEC_CONTROL);
+            ctrl = __get_vvmcs(vcpu_nestedhvm(v).nv_vvmcx, PIN_BASED_VM_EXEC_CONTROL);
             if ( !(ctrl & PIN_BASED_EXT_INTR_MASK) )
                 return 0;
 
             vmx_inject_extint(intack.vector, intack.source);
 
-            ctrl = get_vvmcs(v, VM_EXIT_CONTROLS);
+            ctrl = __get_vvmcs(vcpu_nestedhvm(v).nv_vvmcx, VM_EXIT_CONTROLS);
             if ( ctrl & VM_EXIT_ACK_INTR_ON_EXIT )
             {
                 /* for now, duplicate the ack path in vmx_intr_assist */
@@ -206,10 +206,10 @@ static int nvmx_intr_intercept(struct vcpu *v, struct hvm_intack intack)
 
                 intack = hvm_vcpu_has_pending_irq(v);
                 if ( unlikely(intack.source != hvm_intsrc_none) )
-                    vmx_enable_intr_window(v, intack);
+                    enable_intr_window(v, intack);
             }
             else
-                vmx_enable_intr_window(v, intack);
+                enable_intr_window(v, intack);
 
             return 1;
         }
@@ -257,7 +257,7 @@ void vmx_intr_assist(void)
                   intack.source == hvm_intsrc_vector ||
                   intack.source == hvm_intsrc_nmi) )
             {
-                vmx_enable_intr_window(v, intack);
+                enable_intr_window(v, intack);
                 goto out;
             }
 
@@ -267,7 +267,7 @@ void vmx_intr_assist(void)
                 if ( (intack.source == hvm_intsrc_pic) ||
                      (intack.source == hvm_intsrc_nmi) ||
                      (intack.source == hvm_intsrc_mce) )
-                    vmx_enable_intr_window(v, intack);
+                    enable_intr_window(v, intack);
 
                 goto out;
             }
@@ -280,7 +280,7 @@ void vmx_intr_assist(void)
         }
         else if ( intblk != hvm_intblk_none )
         {
-            vmx_enable_intr_window(v, intack);
+            enable_intr_window(v, intack);
             goto out;
         }
         else
@@ -288,7 +288,7 @@ void vmx_intr_assist(void)
             __vmread(VM_ENTRY_INTR_INFO, &intr_info);
             if ( intr_info & INTR_INFO_VALID_MASK )
             {
-                vmx_enable_intr_window(v, intack);
+                enable_intr_window(v, intack);
                 goto out;
             }
         }
@@ -302,7 +302,7 @@ void vmx_intr_assist(void)
     }
     else if ( intack.source == hvm_intsrc_mce )
     {
-        hvm_inject_hw_exception(TRAP_machine_check, X86_EVENT_NO_EC);
+        hvm_inject_hw_exception(TRAP_machine_check, HVM_DELIVER_NO_ERROR_CODE);
     }
     else if ( cpu_has_vmx_virtual_intr_delivery &&
               intack.source != hvm_intsrc_pic &&
@@ -312,54 +312,12 @@ void vmx_intr_assist(void)
         unsigned int i, n;
 
        /*
-        * intack.vector is the highest priority vector. So we set eoi_exit_bitmap
-        * for intack.vector - give a chance to post periodic time interrupts when
-        * periodic time interrupts become the highest one
+        * Set eoi_exit_bitmap for periodic timer interrup to cause EOI-induced VM
+        * exit, then pending periodic time interrups have the chance to be injected
+        * for compensation
         */
-        if ( pt_vector != -1 )
-        {
-            /*
-             * We assert that intack.vector is the highest priority vector for
-             * only an interrupt from vlapic can reach this point and the
-             * highest vector is chosen in hvm_vcpu_has_pending_irq().
-             * But, in fact, the assertion failed sometimes. It is suspected
-             * that PIR is not synced to vIRR which makes pt_vector is left in
-             * PIR. In order to verify this suspicion, dump some information
-             * when the assertion fails.
-             */
-            if ( unlikely(intack.vector < pt_vector) )
-            {
-                const struct vlapic *vlapic;
-                const struct pi_desc *pi_desc;
-                const uint32_t *word;
-                unsigned int i;
-
-                printk(XENLOG_ERR "%pv: intack: %02x:%u pt: %02x\n",
-                       current, intack.source, intack.vector, pt_vector);
-
-                vlapic = vcpu_vlapic(v);
-                if ( vlapic && vlapic->regs )
-                {
-                    word = (const void *)&vlapic->regs->data[APIC_IRR];
-                    printk(XENLOG_ERR "vIRR:");
-                    for ( i = NR_VECTORS / 32; i-- ; )
-                        printk(" %08x", word[i*4]);
-                    printk("\n");
-                }
-
-                pi_desc = &v->arch.hvm_vmx.pi_desc;
-                if ( pi_desc )
-                {
-                    word = (const void *)&pi_desc->pir;
-                    printk(XENLOG_ERR " PIR:");
-                    for ( i = NR_VECTORS / 32; i-- ; )
-                        printk(" %08x", word[i]);
-                    printk("\n");
-                }
-            }
-            ASSERT(intack.vector >= pt_vector);
-            vmx_set_eoi_exit_bitmap(v, intack.vector);
-        }
+        if (pt_vector != -1)
+            vmx_set_eoi_exit_bitmap(v, pt_vector);
 
         /* we need update the RVI field */
         __vmread(GUEST_INTR_STATUS, &status);
@@ -392,7 +350,7 @@ void vmx_intr_assist(void)
          intack.source == hvm_intsrc_vector )
     {
         if ( unlikely(intack.source != hvm_intsrc_none) )
-            vmx_enable_intr_window(v, intack);
+            enable_intr_window(v, intack);
     }
 
  out:

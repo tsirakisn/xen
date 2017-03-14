@@ -29,8 +29,6 @@
 
 #include <xenstore.h>
 
-#include "_paths.h"
-
 #define DEVTYPE_UNKNOWN 0
 #define DEVTYPE_VIF 1
 #define DEVTYPE_VBD 2
@@ -46,10 +44,10 @@
 #define VBD_SCRIPT XEN_SCRIPT_DIR"/block"
 #endif
 #ifndef LOG_FILE
-#define LOG_FILE XEN_LOG_DIR "xenbackendd.log"
+#define LOG_FILE "/var/log/xen/xenbackendd.log"
 #endif
 #ifndef PID_FILE
-#define PID_FILE XEN_RUN_DIR "xenbackendd.pid"
+#define PID_FILE "/var/run/xenbackendd.pid"
 #endif
 
 

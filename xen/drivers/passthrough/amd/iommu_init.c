@@ -17,6 +17,7 @@
  * along with this program; If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <xen/config.h>
 #include <xen/errno.h>
 #include <xen/acpi.h>
 #include <xen/pci.h>
@@ -34,7 +35,6 @@ static int __initdata nr_amd_iommus;
 static struct tasklet amd_iommu_irq_tasklet;
 
 unsigned int __read_mostly ivrs_bdf_entries;
-u8 __read_mostly ivhd_type;
 static struct radix_tree_root ivrs_maps;
 struct list_head amd_iommu_head;
 struct table_struct device_table;
@@ -673,9 +673,9 @@ void parse_ppr_log_entry(struct amd_iommu *iommu, u32 entry[])
     bus = PCI_BUS(device_id);
     devfn = PCI_DEVFN2(device_id);
 
-    pcidevs_lock();
+    spin_lock(&pcidevs_lock);
     pdev = pci_get_real_pdev(iommu->seg, bus, devfn);
-    pcidevs_unlock();
+    spin_unlock(&pcidevs_lock);
 
     if ( pdev )
         guest_iommu_add_ppr_log(pdev->domain, entry);
@@ -778,6 +778,7 @@ static bool_t __init set_iommu_interrupt_handler(struct amd_iommu *iommu)
 {
     int irq, ret;
     hw_irq_controller *handler;
+    unsigned long flags;
     u16 control;
 
     irq = create_irq(NUMA_NO_NODE);
@@ -787,10 +788,10 @@ static bool_t __init set_iommu_interrupt_handler(struct amd_iommu *iommu)
         return 0;
     }
 
-    pcidevs_lock();
+    spin_lock_irqsave(&pcidevs_lock, flags);
     iommu->msi.dev = pci_get_pdev(iommu->seg, PCI_BUS(iommu->bdf),
                                   PCI_DEVFN2(iommu->bdf));
-    pcidevs_unlock();
+    spin_unlock_irqrestore(&pcidevs_lock, flags);
     if ( !iommu->msi.dev )
     {
         AMD_IOMMU_DEBUG("IOMMU: no pdev for %04x:%02x:%02x.%u\n",
@@ -1225,7 +1226,6 @@ static bool_t __init amd_sp5100_erratum28(void)
 int __init amd_iommu_init(void)
 {
     struct amd_iommu *iommu;
-    int rc = -ENODEV;
 
     BUG_ON( !iommu_found() );
 
@@ -1233,43 +1233,25 @@ int __init amd_iommu_init(void)
          amd_sp5100_erratum28() )
         goto error_out;
 
-    /* We implies no IOMMU if ACPI indicates no MSI. */
-    if ( unlikely(acpi_gbl_FADT.boot_flags & ACPI_FADT_NO_MSI) )
-        goto error_out;
+    ivrs_bdf_entries = amd_iommu_get_ivrs_dev_entries();
 
-    rc = amd_iommu_get_supported_ivhd_type();
-    if ( rc < 0 )
+    if ( !ivrs_bdf_entries )
         goto error_out;
-    ivhd_type = rc;
-
-    rc = amd_iommu_get_ivrs_dev_entries();
-    if ( !rc )
-        rc = -ENODEV;
-    if ( rc < 0 )
-        goto error_out;
-    ivrs_bdf_entries = rc;
 
     radix_tree_init(&ivrs_maps);
     for_each_amd_iommu ( iommu )
-    {
-        rc = alloc_ivrs_mappings(iommu->seg);
-        if ( rc )
+        if ( alloc_ivrs_mappings(iommu->seg) != 0 )
             goto error_out;
-    }
 
-    rc = amd_iommu_update_ivrs_mapping_acpi();
-    if ( rc )
+    if ( amd_iommu_update_ivrs_mapping_acpi() != 0 )
         goto error_out;
 
     /* initialize io-apic interrupt remapping entries */
-    if ( iommu_intremap )
-        rc = amd_iommu_setup_ioapic_remapping();
-    if ( rc )
+    if ( iommu_intremap && amd_iommu_setup_ioapic_remapping() != 0 )
         goto error_out;
 
     /* allocate and initialize a global device table shared by all iommus */
-    rc = iterate_ivrs_mappings(amd_iommu_setup_device_table);
-    if ( rc )
+    if ( iterate_ivrs_mappings(amd_iommu_setup_device_table) != 0 )
         goto error_out;
 
     /*
@@ -1282,17 +1264,14 @@ int __init amd_iommu_init(void)
 
     /* per iommu initialization  */
     for_each_amd_iommu ( iommu )
-    {
-        rc = amd_iommu_init_one(iommu);
-        if ( rc )
+        if ( amd_iommu_init_one(iommu) != 0 )
             goto error_out;
-    }
 
     return 0;
 
 error_out:
     amd_iommu_init_cleanup();
-    return rc;
+    return -ENODEV;
 }
 
 static void disable_iommu(struct amd_iommu *iommu)
@@ -1361,14 +1340,7 @@ static void invalidate_all_devices(void)
     iterate_ivrs_mappings(_invalidate_all_devices);
 }
 
-int amd_iommu_suspend(void)
-{
-    amd_iommu_crash_shutdown();
-
-    return 0;
-}
-
-void amd_iommu_crash_shutdown(void)
+void amd_iommu_suspend(void)
 {
     struct amd_iommu *iommu;
 

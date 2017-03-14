@@ -4,6 +4,7 @@
  * VESA linear frame buffer handling.
  */
 
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/lib.h>
 #include <xen/xmalloc.h>

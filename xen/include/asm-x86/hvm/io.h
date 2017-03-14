@@ -44,18 +44,18 @@ struct hvm_mmio_ops {
 
 static inline paddr_t hvm_mmio_first_byte(const ioreq_t *p)
 {
-    return unlikely(p->df) ?
+    return p->df ?
            p->addr - (p->count - 1ul) * p->size :
            p->addr;
 }
 
 static inline paddr_t hvm_mmio_last_byte(const ioreq_t *p)
 {
-    unsigned long size = p->size;
+    unsigned long count = p->count;
 
-    return unlikely(p->df) ?
-           p->addr + size - 1:
-           p->addr + (p->count * size) - 1;
+    return p->df ?
+           p->addr + p->size - 1:
+           p->addr + (count * p->size) - 1;
 }
 
 typedef int (*portio_action_t)(
@@ -97,6 +97,8 @@ struct hvm_io_ops {
 int hvm_process_io_intercept(const struct hvm_io_handler *handler,
                              ioreq_t *p);
 
+const struct hvm_io_handler *hvm_find_io_handler(ioreq_t *p);
+
 int hvm_io_intercept(ioreq_t *p);
 
 struct hvm_io_handler *hvm_next_io_handler(struct domain *d);
@@ -116,9 +118,10 @@ void relocate_portio_handler(
 
 void send_timeoffset_req(unsigned long timeoff);
 void send_invalidate_req(void);
-bool handle_mmio_with_translation(unsigned long gla, unsigned long gpfn,
-                                  struct npfec);
-bool handle_pio(uint16_t port, unsigned int size, int dir);
+int handle_mmio(void);
+int handle_mmio_with_translation(unsigned long gva, unsigned long gpfn,
+                                 struct npfec);
+int handle_pio(uint16_t port, unsigned int size, int dir);
 void hvm_interrupt_post(struct vcpu *v, int vector, int type);
 void hvm_dpci_eoi(struct domain *d, unsigned int guest_irq,
                   const union vioapic_redir_entry *ent);

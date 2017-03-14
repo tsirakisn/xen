@@ -400,7 +400,7 @@ int
 _tap_list_join3(int n_minors, int *minorv, int n_taps, struct tapdisk *tapv,
 		tap_list_t ***_list)
 {
-	tap_list_t **list, **_entry;
+	tap_list_t **list, **_entry, *entry;
 	int i, _m, err;
 
 	list = tap_ctl_alloc_list(n_minors + n_taps);
@@ -454,7 +454,7 @@ _tap_list_join3(int n_minors, int *minorv, int n_taps, struct tapdisk *tapv,
 	}
 
 	/* free extraneous list entries */
-	for (; *_entry != NULL; ++_entry) {
+	for (; *_entry != NULL; ++entry) {
 		free_list(*_entry);
 		*_entry = NULL;
 	}
@@ -533,4 +533,30 @@ tap_ctl_find(const char *type, const char *path, tap_list_t *tap)
 	tap_ctl_free_list(list);
 
 	return ret;
+}
+
+int
+tap_ctl_find_pid(int minor)
+{
+	int pid, err;
+	tap_list_t **list, **_entry;
+
+	err = tap_ctl_list(&list);
+	if (err)
+		return err;
+
+	pid = -1;
+
+	for (_entry = list; *_entry != NULL; ++_entry) {
+		tap_list_t *entry  = *_entry;
+
+		if (entry->minor == minor) {
+			pid = entry->pid;
+			break;
+		}
+	}
+
+	tap_ctl_free_list(list);
+
+	return pid >= 0 ? pid : -ENOENT;
 }

@@ -17,6 +17,7 @@
  * GNU General Public License for more details.
  */
 
+#include <xen/config.h>
 #include <xen/lib.h>
 #include <xen/spinlock.h>
 #include <xen/irq.h>
@@ -65,7 +66,7 @@ irq_desc_t *__irq_to_desc(int irq)
 
 int __init arch_init_one_irq_desc(struct irq_desc *desc)
 {
-    desc->arch.type = IRQ_TYPE_INVALID;
+    desc->arch.type = DT_IRQ_TYPE_INVALID;
     return 0;
 }
 
@@ -84,7 +85,7 @@ static int __init init_irq_data(void)
     return 0;
 }
 
-static int init_local_irq_data(void)
+static int __cpuinit init_local_irq_data(void)
 {
     int irq;
 
@@ -116,14 +117,14 @@ void __init init_IRQ(void)
 
     spin_lock(&local_irqs_type_lock);
     for ( irq = 0; irq < NR_LOCAL_IRQS; irq++ )
-        local_irqs_type[irq] = IRQ_TYPE_INVALID;
+        local_irqs_type[irq] = DT_IRQ_TYPE_INVALID;
     spin_unlock(&local_irqs_type_lock);
 
     BUG_ON(init_local_irq_data() < 0);
     BUG_ON(init_irq_data() < 0);
 }
 
-void init_secondary_IRQ(void)
+void __cpuinit init_secondary_IRQ(void)
 {
     BUG_ON(init_local_irq_data() < 0);
 }
@@ -369,7 +370,6 @@ int setup_irq(unsigned int irq, unsigned int irqflags, struct irqaction *new)
     /* First time the IRQ is setup */
     if ( disabled )
     {
-        gic_route_irq_to_xen(desc, GIC_PRI_IRQ);
         /* It's fine to use smp_processor_id() because:
          * For PPI: irq_desc is banked
          * For SPI: we don't care for now which CPU will receive the
@@ -377,7 +377,8 @@ int setup_irq(unsigned int irq, unsigned int irqflags, struct irqaction *new)
          * TODO: Handle case where SPI is setup on different CPU than
          * the targeted CPU and the priority.
          */
-        irq_set_affinity(desc, cpumask_of(smp_processor_id()));
+        gic_route_irq_to_xen(desc, cpumask_of(smp_processor_id()),
+                             GIC_PRI_IRQ);
         desc->handler->startup(desc);
     }
 
@@ -391,17 +392,6 @@ bool_t is_assignable_irq(unsigned int irq)
 {
     /* For now, we can only route SPIs to the guest */
     return ((irq >= NR_LOCAL_IRQS) && (irq < gic_number_lines()));
-}
-
-/*
- * Only the hardware domain is allowed to set the configure the
- * interrupt type for now.
- *
- * XXX: See whether it is possible to let any domain configure the type.
- */
-bool_t irq_type_set_by_domain(const struct domain *d)
-{
-    return (d == hardware_domain);
 }
 
 /*
@@ -459,7 +449,7 @@ int route_irq_to_guest(struct domain *d, unsigned int virq,
 
     spin_lock_irqsave(&desc->lock, flags);
 
-    if ( !irq_type_set_by_domain(d) && desc->arch.type == IRQ_TYPE_INVALID )
+    if ( desc->arch.type == DT_IRQ_TYPE_INVALID )
     {
         printk(XENLOG_G_ERR "IRQ %u has not been configured\n", irq);
         retval = -EIO;
@@ -476,29 +466,26 @@ int route_irq_to_guest(struct domain *d, unsigned int virq,
      */
     if ( desc->action != NULL )
     {
-        if ( test_bit(_IRQ_GUEST, &desc->status) )
-        {
-            struct domain *ad = irq_get_domain(desc);
+        struct domain *ad = irq_get_domain(desc);
 
-            if ( d != ad )
-            {
-                printk(XENLOG_G_ERR "IRQ %u is already used by domain %u\n",
-                       irq, ad->domain_id);
-                retval = -EBUSY;
-            }
-            else if ( irq_get_guest_info(desc)->virq != virq )
+        if ( test_bit(_IRQ_GUEST, &desc->status) && d == ad )
+        {
+            if ( irq_get_guest_info(desc)->virq != virq )
             {
                 printk(XENLOG_G_ERR
                        "d%u: IRQ %u is already assigned to vIRQ %u\n",
                        d->domain_id, irq, irq_get_guest_info(desc)->virq);
                 retval = -EBUSY;
             }
+            goto out;
         }
+
+        if ( test_bit(_IRQ_GUEST, &desc->status) )
+            printk(XENLOG_G_ERR "IRQ %u is already used by domain %u\n",
+                   irq, ad->domain_id);
         else
-        {
             printk(XENLOG_G_ERR "IRQ %u is already used by Xen\n", irq);
-            retval = -EBUSY;
-        }
+        retval = -EBUSY;
         goto out;
     }
 
@@ -604,7 +591,7 @@ void pirq_set_affinity(struct domain *d, int pirq, const cpumask_t *mask)
 
 static bool_t irq_validate_new_type(unsigned int curr, unsigned new)
 {
-    return (curr == IRQ_TYPE_INVALID || curr == new );
+    return (curr == DT_IRQ_TYPE_INVALID || curr == new );
 }
 
 int irq_set_spi_type(unsigned int spi, unsigned int type)
@@ -668,9 +655,18 @@ unlock:
     return ret;
 }
 
-int irq_set_type(unsigned int irq, unsigned int type)
+int platform_get_irq(const struct dt_device_node *device, int index)
 {
+    struct dt_irq dt_irq;
+    unsigned int type, irq;
     int res;
+
+    res = dt_device_get_irq(device, index, &dt_irq);
+    if ( res )
+        return -1;
+
+    irq = dt_irq.irq;
+    type = dt_irq.type;
 
     /* Setup the IRQ type */
     if ( irq < NR_LOCAL_IRQS )
@@ -678,22 +674,8 @@ int irq_set_type(unsigned int irq, unsigned int type)
     else
         res = irq_set_spi_type(irq, type);
 
-    return res;
-}
-
-int platform_get_irq(const struct dt_device_node *device, int index)
-{
-    struct dt_irq dt_irq;
-    unsigned int type, irq;
-
-    if ( dt_device_get_irq(device, index, &dt_irq) )
-        return -1;
-
-    irq = dt_irq.irq;
-    type = dt_irq.type;
-
-    if ( irq_set_type(irq, type) )
-        return -1;
+    if ( res )
+            return -1;
 
     return irq;
 }

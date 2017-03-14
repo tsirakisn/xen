@@ -1,9 +1,37 @@
+#include <xen/config.h>
 #include <xen/init.h>
 #include <xen/kernel.h>
 #include <xen/lib.h>
 #include <xen/domain.h>
 #include <xen/sched.h>
 #include <xen/trace.h>
+
+void __trace_hypercall_entry(void)
+{
+    struct cpu_user_regs *regs = guest_cpu_user_regs();
+    unsigned long args[6];
+
+    if ( is_pv_32bit_vcpu(current) )
+    {
+        args[0] = regs->ebx;
+        args[1] = regs->ecx;
+        args[2] = regs->edx;
+        args[3] = regs->esi;
+        args[4] = regs->edi;
+        args[5] = regs->ebp;
+    }
+    else
+    {
+        args[0] = regs->rdi;
+        args[1] = regs->rsi;
+        args[2] = regs->rdx;
+        args[3] = regs->r10;
+        args[4] = regs->r8;
+        args[5] = regs->r9;
+    }
+
+    __trace_hypercall(TRC_PV_HYPERCALL_V2, regs->eax, args);
+}
 
 void __trace_pv_trap(int trapnr, unsigned long eip,
                      int use_error_code, unsigned error_code)
@@ -47,7 +75,7 @@ void __trace_pv_trap(int trapnr, unsigned long eip,
 
 void __trace_pv_page_fault(unsigned long addr, unsigned error_code)
 {
-    unsigned long eip = guest_cpu_user_regs()->rip;
+    unsigned long eip = guest_cpu_user_regs()->eip;
 
     if ( is_pv_32bit_vcpu(current) )
     {
@@ -118,7 +146,7 @@ void __trace_trap_two_addr(unsigned event, unsigned long va1,
 
 void __trace_ptwr_emulation(unsigned long addr, l1_pgentry_t npte)
 {
-    unsigned long eip = guest_cpu_user_regs()->rip;
+    unsigned long eip = guest_cpu_user_regs()->eip;
 
     /* We have a couple of different modes to worry about:
      * - 32-on-32: 32-bit pte, 32-bit virtual addresses

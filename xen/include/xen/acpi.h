@@ -39,17 +39,7 @@
 #define ACPI_MADT_GET_POLARITY(inti)	ACPI_MADT_GET_(POLARITY, inti)
 #define ACPI_MADT_GET_TRIGGER(inti)	ACPI_MADT_GET_(TRIGGER, inti)
 
-/*
- * Fixmap pages to reserve for ACPI boot-time tables (see asm-x86/fixmap.h or
- * asm-arm/config.h)
- */
-#define NUM_FIXMAP_ACPI_PAGES  4
-
-#define BAD_MADT_ENTRY(entry, end) (                                        \
-                (!(entry)) || (unsigned long)(entry) + sizeof(*(entry)) > (end) ||  \
-                (entry)->header.length < sizeof(*(entry)))
-
-#ifdef CONFIG_ACPI
+#ifdef CONFIG_ACPI_BOOT
 
 enum acpi_interrupt_id {
 	ACPI_INTERRUPT_PMI	= 1,
@@ -74,14 +64,8 @@ void acpi_hest_init(void);
 
 int acpi_table_init (void);
 int acpi_table_parse(char *id, acpi_table_handler handler);
-int acpi_parse_entries(char *id, unsigned long table_size,
-		       acpi_table_entry_handler handler,
-		       struct acpi_table_header *table_header,
-		       int entry_id, unsigned int max_entries);
 int acpi_table_parse_entries(char *id, unsigned long table_size,
 	int entry_id, acpi_table_entry_handler handler, unsigned int max_entries);
-struct acpi_subtable_header *acpi_table_get_entry_madt(enum acpi_madt_type id,
-						      unsigned int entry_index);
 int acpi_table_parse_madt(enum acpi_madt_type id, acpi_table_entry_handler handler, unsigned int max_entries);
 int acpi_table_parse_srat(int id, acpi_madt_entry_handler handler,
 	unsigned int max_entries);
@@ -92,9 +76,9 @@ void acpi_table_print_srat_entry (struct acpi_subtable_header *srat);
 
 /* the following four functions are architecture-dependent */
 void acpi_numa_slit_init (struct acpi_table_slit *slit);
-void acpi_numa_processor_affinity_init(const struct acpi_srat_cpu_affinity *);
-void acpi_numa_x2apic_affinity_init(const struct acpi_srat_x2apic_cpu_affinity *);
-void acpi_numa_memory_affinity_init(const struct acpi_srat_mem_affinity *);
+void acpi_numa_processor_affinity_init (struct acpi_srat_cpu_affinity *pa);
+void acpi_numa_x2apic_affinity_init(struct acpi_srat_x2apic_cpu_affinity *pa);
+void acpi_numa_memory_affinity_init (struct acpi_srat_mem_affinity *ma);
 void acpi_numa_arch_fixup(void);
 
 #ifdef CONFIG_ACPI_HOTPLUG_CPU
@@ -107,7 +91,7 @@ extern int acpi_mp_config;
 
 extern u32 pci_mmcfg_base_addr;
 
-#else	/*!CONFIG_ACPI*/
+#else	/*!CONFIG_ACPI_BOOT*/
 
 #define acpi_mp_config	0
 
@@ -121,7 +105,7 @@ static inline int acpi_boot_table_init(void)
 	return 0;
 }
 
-#endif 	/*!CONFIG_ACPI*/
+#endif 	/*!CONFIG_ACPI_BOOT*/
 
 int get_cpu_id(u32 acpi_id);
 

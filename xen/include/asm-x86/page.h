@@ -93,11 +93,6 @@
 #define l3e_get_flags(x)           (get_pte_flags((x).l3))
 #define l4e_get_flags(x)           (get_pte_flags((x).l4))
 
-/* Get pte pkeys (unsigned int). */
-#define l1e_get_pkey(x)           get_pte_pkey((x).l1)
-#define l2e_get_pkey(x)           get_pte_pkey((x).l2)
-#define l3e_get_pkey(x)           get_pte_pkey((x).l3)
-
 /* Construct an empty pte. */
 #define l1e_empty()                ((l1_pgentry_t) { 0 })
 #define l2e_empty()                ((l2_pgentry_t) { 0 })
@@ -214,10 +209,13 @@ typedef struct { u64 pfn; } pagetable_t;
 #define pagetable_null()        pagetable_from_pfn(0)
 
 void clear_page_sse2(void *);
+#define clear_page(_p)      (cpu_has_xmm2 ?                             \
+                             clear_page_sse2((void *)(_p)) :            \
+                             (void)memset((void *)(_p), 0, PAGE_SIZE))
 void copy_page_sse2(void *, const void *);
-
-#define clear_page(_p)      clear_page_sse2(_p)
-#define copy_page(_t, _f)   copy_page_sse2(_t, _f)
+#define copy_page(_t,_f)    (cpu_has_xmm2 ?                             \
+                             copy_page_sse2(_t, _f) :                   \
+                             (void)memcpy(_t, _f, PAGE_SIZE))
 
 /* Convert between Xen-heap virtual addresses and machine addresses. */
 #define __pa(x)             (virt_to_maddr(x))
@@ -252,7 +250,7 @@ void copy_page_sse2(void *, const void *);
  * We define non-underscored wrappers for above conversion functions. These are
  * overridden in various source files while underscored versions remain intact.
  */
-#define mfn_valid(mfn)      __mfn_valid(mfn_x(mfn))
+#define mfn_valid(mfn)      __mfn_valid(mfn)
 #define virt_to_mfn(va)     __virt_to_mfn(va)
 #define mfn_to_virt(mfn)    __mfn_to_virt(mfn)
 #define virt_to_maddr(va)   __virt_to_maddr((unsigned long)(va))
@@ -291,7 +289,8 @@ extern l2_pgentry_t l2_xenmap[L2_PAGETABLE_ENTRIES],
     l2_bootmap[L2_PAGETABLE_ENTRIES];
 extern l3_pgentry_t l3_bootmap[L3_PAGETABLE_ENTRIES];
 extern l2_pgentry_t l2_identmap[4*L2_PAGETABLE_ENTRIES];
-extern l1_pgentry_t l1_fixmap[L1_PAGETABLE_ENTRIES];
+extern l1_pgentry_t l1_identmap[L1_PAGETABLE_ENTRIES],
+    l1_fixmap[L1_PAGETABLE_ENTRIES];
 void paging_init(void);
 void efi_update_l4_pgtable(unsigned int l4idx, l4_pgentry_t);
 #endif /* !defined(__ASSEMBLY__) */
@@ -348,11 +347,11 @@ void free_xen_pagetable(void *v);
 l1_pgentry_t *virt_to_xen_l1e(unsigned long v);
 
 /* Convert between PAT/PCD/PWT embedded in PTE flags and 3-bit cacheattr. */
-static inline unsigned int pte_flags_to_cacheattr(unsigned int flags)
+static inline uint32_t pte_flags_to_cacheattr(uint32_t flags)
 {
     return ((flags >> 5) & 4) | ((flags >> 3) & 3);
 }
-static inline unsigned int cacheattr_to_pte_flags(unsigned int cacheattr)
+static inline uint32_t cacheattr_to_pte_flags(uint32_t cacheattr)
 {
     return ((cacheattr & 4) << 5) | ((cacheattr & 3) << 3);
 }

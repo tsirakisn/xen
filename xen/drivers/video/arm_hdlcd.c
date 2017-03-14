@@ -20,6 +20,7 @@
 #include <asm/delay.h>
 #include <asm/types.h>
 #include <asm/platforms/vexpress.h>
+#include <xen/config.h>
 #include <xen/device_tree.h>
 #include <xen/libfdt/libfdt.h>
 #include <xen/init.h>

@@ -20,7 +20,6 @@
 #define __ASM_ARM_MMIO_H__
 
 #include <xen/lib.h>
-#include <xen/rwlock.h>
 #include <asm/processor.h>
 #include <asm/regs.h>
 
@@ -33,37 +32,32 @@ typedef struct
     paddr_t gpa;
 } mmio_info_t;
 
-typedef int (*mmio_read_t)(struct vcpu *v, mmio_info_t *info,
-                           register_t *r, void *priv);
-typedef int (*mmio_write_t)(struct vcpu *v, mmio_info_t *info,
-                            register_t r, void *priv);
+typedef int (*mmio_read_t)(struct vcpu *v, mmio_info_t *info);
+typedef int (*mmio_write_t)(struct vcpu *v, mmio_info_t *info);
+typedef int (*mmio_check_t)(struct vcpu *v, paddr_t addr);
 
 struct mmio_handler_ops {
-    mmio_read_t read;
-    mmio_write_t write;
+    mmio_read_t read_handler;
+    mmio_write_t write_handler;
 };
 
 struct mmio_handler {
     paddr_t addr;
     paddr_t size;
-    const struct mmio_handler_ops *ops;
-    void *priv;
+    const struct mmio_handler_ops *mmio_handler_ops;
 };
 
-struct vmmio {
+struct io_handler {
     int num_entries;
-    int max_num_entries;
-    rwlock_t lock;
-    struct mmio_handler *handlers;
+    spinlock_t lock;
+    struct mmio_handler mmio_handlers[MAX_IO_HANDLER];
 };
 
 extern int handle_mmio(mmio_info_t *info);
 void register_mmio_handler(struct domain *d,
-                           const struct mmio_handler_ops *ops,
-                           paddr_t addr, paddr_t size, void *priv);
-int domain_io_init(struct domain *d, int max_count);
-void domain_io_free(struct domain *d);
-
+                           const struct mmio_handler_ops *handle,
+                           paddr_t addr, paddr_t size);
+int domain_io_init(struct domain *d);
 
 #endif  /* __ASM_ARM_MMIO_H__ */
 

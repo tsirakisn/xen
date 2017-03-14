@@ -13,6 +13,7 @@
  *		Paul Diefenbaugh:	Added full ACPI support
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/irq.h>
 #include <xen/init.h>
@@ -60,7 +61,7 @@ unsigned long __read_mostly mp_lapic_addr;
 unsigned int __read_mostly boot_cpu_physical_apicid = BAD_APICID;
 
 /* Internal processor count */
-static unsigned int num_processors;
+static unsigned int __devinitdata num_processors;
 static unsigned int __initdata disabled_cpus;
 
 /* Bitmask of physically existing CPUs */
@@ -118,16 +119,18 @@ static int __init mpf_checksum(unsigned char *mp, int len)
 }
 
 /* Return xen's logical cpu_id of the new added cpu or <0 if error */
-static int MP_processor_info_x(struct mpc_config_processor *m,
-			       u32 apicid, bool_t hotplug)
+static int __devinit MP_processor_info_x(struct mpc_config_processor *m,
+					 u32 apicidx, bool_t hotplug)
 {
- 	int ver, cpu = 0;
+ 	int ver, apicid, cpu = 0;
  	
 	if (!(m->mpc_cpuflag & CPU_ENABLED)) {
 		if (!hotplug)
 			++disabled_cpus;
 		return -EINVAL;
 	}
+
+	apicid = mpc_apic_id(m, apicidx);
 
 	if (m->mpc_cpuflag & CPU_BOOTPROCESSOR) {
 		Dprintk("    Bootup CPU\n");
@@ -184,7 +187,7 @@ static int MP_processor_info_x(struct mpc_config_processor *m,
 	return cpu;
 }
 
-static int MP_processor_info(struct mpc_config_processor *m)
+static int __devinit MP_processor_info(struct mpc_config_processor *m)
 {
 	return MP_processor_info_x(m, m->mpc_apicid, 0);
 }
@@ -332,24 +335,11 @@ static int __init smp_read_mpc(struct mp_config_table *mpc)
 			{
 				struct mpc_config_processor *m=
 					(struct mpc_config_processor *)mpt;
-
+				/* ACPI may have already provided this data */
+				if (!acpi_lapic)
+					MP_processor_info(m);
 				mpt += sizeof(*m);
 				count += sizeof(*m);
-
-				/* ACPI may have already provided this data. */
-				if (acpi_lapic)
-					break;
-
-				printk("Processor #%02x %u:%u APIC version %u%s\n",
-				       m->mpc_apicid,
-				       MASK_EXTR(m->mpc_cpufeature,
-						 CPU_FAMILY_MASK),
-				       MASK_EXTR(m->mpc_cpufeature,
-						 CPU_MODEL_MASK),
-				       m->mpc_apicver,
-				       m->mpc_cpuflag & CPU_ENABLED
-				       ? "" : " [disabled]");
-				MP_processor_info(m);
 				break;
 			}
 			case MP_BUS:
@@ -500,8 +490,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 	processor.mpc_cpufeature = (boot_cpu_data.x86 << 8) |
 				   (boot_cpu_data.x86_model << 4) |
 				   boot_cpu_data.x86_mask;
-	processor.mpc_featureflag =
-            boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_FPU)];
+	processor.mpc_featureflag = boot_cpu_data.x86_capability[0];
 	processor.mpc_reserved[0] = 0;
 	processor.mpc_reserved[1] = 0;
 	for (i = 0; i < 2; i++) {
@@ -563,7 +552,7 @@ static inline void __init construct_default_ISA_mptable(int mpc_default_type)
 
 static __init void efi_unmap_mpf(void)
 {
-	if (efi_enabled(EFI_BOOT))
+	if (efi_enabled)
 		clear_fixmap(FIX_EFI_MPF);
 }
 
@@ -721,7 +710,7 @@ void __init find_smp_config (void)
 {
 	unsigned int address;
 
-	if (efi_enabled(EFI_BOOT)) {
+	if (efi_enabled) {
 		efi_check_config();
 		return;
 	}
@@ -781,26 +770,33 @@ void __init mp_register_lapic_address (
 }
 
 
-int mp_register_lapic (
+int __devinit mp_register_lapic (
 	u32			id,
 	bool_t			enabled,
 	bool_t			hotplug)
 {
-	struct mpc_config_processor processor = {
-		.mpc_type = MP_PROCESSOR,
-		/* Note: We don't fill in fields not consumed anywhere. */
-		.mpc_apicid = id,
-		.mpc_apicver = GET_APIC_VERSION(apic_read(APIC_LVR)),
-		.mpc_cpuflag = (enabled ? CPU_ENABLED : 0) |
-			       (id == boot_cpu_physical_apicid ?
-				CPU_BOOTPROCESSOR : 0),
-	};
+	struct mpc_config_processor processor;
+	int			boot_cpu = 0;
 	
 	if (MAX_APICS <= id) {
 		printk(KERN_WARNING "Processor #%d invalid (max %d)\n",
 			id, MAX_APICS);
 		return -EINVAL;
 	}
+
+	if (id == boot_cpu_physical_apicid)
+		boot_cpu = 1;
+
+	processor.mpc_type = MP_PROCESSOR;
+	processor.mpc_apicid = id;
+	processor.mpc_apicver = GET_APIC_VERSION(apic_read(APIC_LVR));
+	processor.mpc_cpuflag = (enabled ? CPU_ENABLED : 0);
+	processor.mpc_cpuflag |= (boot_cpu ? CPU_BOOTPROCESSOR : 0);
+	processor.mpc_cpufeature = (boot_cpu_data.x86 << 8) | 
+		(boot_cpu_data.x86_model << 4) | boot_cpu_data.x86_mask;
+	processor.mpc_featureflag = boot_cpu_data.x86_capability[0];
+	processor.mpc_reserved[0] = 0;
+	processor.mpc_reserved[1] = 0;
 
 	return MP_processor_info_x(&processor, id, hotplug);
 }

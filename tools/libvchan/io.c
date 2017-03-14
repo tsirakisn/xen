@@ -105,7 +105,7 @@ static inline int send_notify(struct libxenvchan *ctrl, uint8_t bit)
 	notify = ctrl->is_server ? &ctrl->ring->srv_notify : &ctrl->ring->cli_notify;
 	prev = __sync_fetch_and_and(notify, ~bit);
 	if (prev & bit)
-		return xenevtchn_notify(ctrl->event, ctrl->event_port);
+		return xc_evtchn_notify(ctrl->event, ctrl->event_port);
 	else
 		return 0;
 }
@@ -196,10 +196,10 @@ int libxenvchan_buffer_space(struct libxenvchan *ctrl)
 
 int libxenvchan_wait(struct libxenvchan *ctrl)
 {
-	int ret = xenevtchn_pending(ctrl->event);
+	int ret = xc_evtchn_pending(ctrl->event);
 	if (ret < 0)
 		return -1;
-	xenevtchn_unmask(ctrl->event, ret);
+	xc_evtchn_unmask(ctrl->event, ret);
 	return 0;
 }
 
@@ -352,7 +352,7 @@ int libxenvchan_is_open(struct libxenvchan* ctrl)
 
 int libxenvchan_fd_for_select(struct libxenvchan *ctrl)
 {
-	return xenevtchn_fd(ctrl->event);
+	return xc_evtchn_fd(ctrl->event);
 }
 
 void libxenvchan_close(struct libxenvchan *ctrl)
@@ -366,23 +366,23 @@ void libxenvchan_close(struct libxenvchan *ctrl)
 	if (ctrl->ring) {
 		if (ctrl->is_server) {
 			ctrl->ring->srv_live = 0;
-			xengntshr_unshare(ctrl->gntshr, ctrl->ring, 1);
+			xc_gntshr_munmap(ctrl->gntshr, ctrl->ring, 1);
 		} else {
 			ctrl->ring->cli_live = 0;
-			xengnttab_unmap(ctrl->gnttab, ctrl->ring, 1);
+			xc_gnttab_munmap(ctrl->gnttab, ctrl->ring, 1);
 		}
 	}
 	if (ctrl->event) {
 		if (ctrl->ring)
-			xenevtchn_notify(ctrl->event, ctrl->event_port);
-		xenevtchn_close(ctrl->event);
+			xc_evtchn_notify(ctrl->event, ctrl->event_port);
+		xc_evtchn_close(ctrl->event);
 	}
 	if (ctrl->is_server) {
 		if (ctrl->gntshr)
-			xengntshr_close(ctrl->gntshr);
+			xc_gntshr_close(ctrl->gntshr);
 	} else {
 		if (ctrl->gnttab)
-			xengnttab_close(ctrl->gnttab);
+			xc_gnttab_close(ctrl->gnttab);
 	}
 	free(ctrl);
 }

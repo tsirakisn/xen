@@ -11,238 +11,206 @@
  *       Rajan Ravindran <rajancr@us.ibm.com>
  *       Peter Oberparleiter <oberpar@linux.vnet.ibm.com>
  *       Paul Larson
- *
- *  Modified for Xen by:
- *    Wei Liu <wei.liu2@citrix.com>
  */
 
+#include <xen/config.h>
+#include <xen/init.h>
+#include <xen/lib.h>
+#include <xen/hypercall.h>
+#include <xen/gcov.h>
 #include <xen/errno.h>
 #include <xen/guest_access.h>
-#include <xen/types.h>
+#include <public/xen.h>
+#include <public/gcov.h>
 
-#include <public/sysctl.h>
+static struct gcov_info *info_list;
 
-#include "gcov.h"
-
-/**
- * gcov_store_uint32 - store 32 bit number in gcov format to buffer
- * @buffer: target buffer or NULL
- * @off: offset into the buffer
- * @v: value to be stored
+/*
+ * __gcov_init is called by gcc-generated constructor code for each object
+ * file compiled with -fprofile-arcs.
  *
- * Number format defined by gcc: numbers are recorded in the 32 bit
- * unsigned binary form of the endianness of the machine generating the
- * file. Returns the number of bytes stored. If @buffer is %NULL, doesn't
- * store anything.
+ * Although this function is called only during initialization is called from
+ * a .text section which is still present after initialization so not declare
+ * as __init.
  */
-size_t gcov_store_uint32(void *buffer, size_t off, uint32_t v)
+void __gcov_init(struct gcov_info *info)
 {
-    uint32_t *data;
-
-    if ( buffer )
-    {
-        data = buffer + off;
-        *data = v;
-    }
-
-    return sizeof(*data);
+    /* add new profiling data structure to list */
+    info->next = info_list;
+    info_list = info;
 }
 
-/**
- * gcov_store_uint64 - store 64 bit number in gcov format to buffer
- * @buffer: target buffer or NULL
- * @off: offset into the buffer
- * @v: value to be stored
- *
- * Number format defined by gcc: numbers are recorded in the 32 bit
- * unsigned binary form of the endianness of the machine generating the
- * file. 64 bit numbers are stored as two 32 bit numbers, the low part
- * first. Returns the number of bytes stored. If @buffer is %NULL, doesn't store
- * anything.
+/*
+ * These functions may be referenced by gcc-generated profiling code but serve
+ * no function for Xen.
  */
-size_t gcov_store_uint64(void *buffer, size_t off, uint64_t v)
+void __gcov_flush(void)
 {
-    uint32_t *data;
-
-    if ( buffer )
-    {
-        data = buffer + off;
-
-        data[0] = (v & 0xffffffffUL);
-        data[1] = (v >> 32);
-    }
-
-    return sizeof(*data) * 2;
+    /* Unused. */
 }
 
-static size_t gcov_info_payload_size(const struct gcov_info *info)
+void __gcov_merge_add(gcov_type *counters, unsigned int n_counters)
 {
-    return gcov_info_to_gcda(NULL, info);
+    /* Unused. */
 }
 
-static int gcov_info_dump_payload(const struct gcov_info *info,
-                                  XEN_GUEST_HANDLE_PARAM(char) buffer,
-                                  uint32_t *off)
+void __gcov_merge_single(gcov_type *counters, unsigned int n_counters)
 {
-    char *buf;
-    uint32_t buf_size;
-    int ret;
-
-    /*
-     * Allocate a buffer and dump payload there. This helps us to not
-     * have copy_to_guest in other functions and retain their simple
-     * semantics.
-     */
-
-    buf_size = gcov_info_payload_size(info);
-    buf = xmalloc_array(char, buf_size);
-
-    if ( !buf )
-    {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    gcov_info_to_gcda(buf, info);
-
-    if ( copy_to_guest_offset(buffer, *off, buf, buf_size) )
-    {
-        ret = -EFAULT;
-        goto out;
-    }
-    *off += buf_size;
-
-    ret = 0;
- out:
-    xfree(buf);
-    return ret;
-
+    /* Unused. */
 }
 
-static uint32_t gcov_get_size(void)
+void __gcov_merge_delta(gcov_type *counters, unsigned int n_counters)
 {
-    uint32_t total_size = sizeof(uint32_t); /* Magic number XCOV */
-    struct gcov_info *info = NULL;
-
-    while ( (info = gcov_info_next(info)) )
-    {
-        /* File name length, including trailing \0 */
-        total_size += strlen(gcov_info_filename(info)) + 1;
-
-        /* Payload size field */
-        total_size += sizeof(uint32_t);
-
-        /* Payload itself */
-        total_size += gcov_info_payload_size(info);
-    }
-
-    return total_size;
+    /* Unused. */
 }
 
-static void gcov_reset_all_counters(void)
+static inline int counter_active(const struct gcov_info *info, unsigned int type)
 {
-    struct gcov_info *info = NULL;
-
-    while ( (info = gcov_info_next(info)) )
-        gcov_info_reset(info);
+    return (1 << type) & info->ctr_mask;
 }
 
-static int gcov_dump_one_record(const struct gcov_info *info,
-                                XEN_GUEST_HANDLE_PARAM(char) buffer,
-                                uint32_t *off)
+typedef struct write_iter_t
 {
-    uint32_t payload_size;
-    uint32_t len;
+    XEN_GUEST_HANDLE(uint8) ptr;
+    int real;
+    uint32_t write_offset;
+} write_iter_t;
 
-    /* File name, including trailing \0 */
-    len = strlen(gcov_info_filename(info)) + 1;
-    if ( copy_to_guest_offset(buffer, *off, gcov_info_filename(info), len) )
+static int write_raw(struct write_iter_t *iter, const void *data,
+                     size_t data_len)
+{
+    if ( iter->real &&
+        copy_to_guest_offset(iter->ptr, iter->write_offset,
+                             (const unsigned char *) data, data_len) )
         return -EFAULT;
-    *off += len;
 
-    payload_size = gcov_info_payload_size(info);
-    /* Payload size */
-    if ( copy_to_guest_offset(buffer, *off, (char*)&payload_size,
-                              sizeof(uint32_t)) )
-        return -EFAULT;
-    *off += sizeof(uint32_t);
-
-    /* Payload itself */
-    return gcov_info_dump_payload(info, buffer, off);
+    iter->write_offset += data_len;
+    return 0;
 }
 
-static int gcov_dump_all(XEN_GUEST_HANDLE_PARAM(char) buffer,
-                         uint32_t *buffer_size)
+#define chk(v) do { ret=(v); if ( ret ) return ret; } while(0)
+
+static inline int write32(write_iter_t *iter, uint32_t val)
 {
-    uint32_t off;
-    uint32_t magic = XEN_GCOV_FORMAT_MAGIC;
-    struct gcov_info *info = NULL;
-    int ret;
-
-    if ( *buffer_size < gcov_get_size() )
-    {
-        ret = -ENOBUFS;
-        goto out;
-    }
-
-    off = 0;
-
-    /* Magic number */
-    if ( copy_to_guest_offset(buffer, off, (char *)&magic, sizeof(magic)) )
-    {
-        ret = -EFAULT;
-        goto out;
-    }
-    off += sizeof(magic);
-
-    while ( (info = gcov_info_next(info)) )
-    {
-        ret = gcov_dump_one_record(info, buffer, &off);
-        if ( ret )
-            goto out;
-    }
-
-    *buffer_size = off;
-
-    ret = 0;
- out:
-    return ret;
+    return write_raw(iter, &val, sizeof(val));
 }
 
-int sysctl_gcov_op(xen_sysctl_gcov_op_t *op)
+static int write_string(write_iter_t *iter, const char *s)
 {
     int ret;
+    size_t len = strlen(s);
+
+    chk(write32(iter, len));
+    return write_raw(iter, s, len);
+}
+
+static inline int next_type(const struct gcov_info *info, int *type)
+{
+    while ( ++*type < XENCOV_COUNTERS && !counter_active(info, *type) )
+        continue;
+    return *type;
+}
+
+static inline void align_iter(write_iter_t *iter)
+{
+    iter->write_offset =
+        (iter->write_offset + sizeof(uint64_t) - 1) & -sizeof(uint64_t);
+}
+
+static int write_gcov(write_iter_t *iter)
+{
+    struct gcov_info *info;
+    int ret;
+
+    /* reset offset */
+    iter->write_offset = 0;
+
+    /* dump all files */
+    for ( info = info_list ; info; info = info->next )
+    {
+        const struct gcov_ctr_info *ctr;
+        int type;
+        size_t size_fn = sizeof(struct gcov_fn_info);
+
+        align_iter(iter);
+        chk(write32(iter, XENCOV_TAG_FILE));
+        chk(write32(iter, info->version));
+        chk(write32(iter, info->stamp));
+        chk(write_string(iter, info->filename));
+
+        /* dump counters */
+        ctr = info->counts;
+        for ( type = -1; next_type(info, &type) < XENCOV_COUNTERS; ++ctr )
+        {
+            align_iter(iter);
+            chk(write32(iter, XENCOV_TAG_COUNTER(type)));
+            chk(write32(iter, ctr->num));
+            chk(write_raw(iter, ctr->values,
+                          ctr->num * sizeof(ctr->values[0])));
+
+            size_fn += sizeof(unsigned);
+        }
+
+        /* dump all functions together */
+        align_iter(iter);
+        chk(write32(iter, XENCOV_TAG_FUNC));
+        chk(write32(iter, info->n_functions));
+        chk(write_raw(iter, info->functions, info->n_functions * size_fn));
+    }
+
+    /* stop tag */
+    align_iter(iter);
+    chk(write32(iter, XENCOV_TAG_END));
+    return 0;
+}
+
+static int reset_counters(void)
+{
+    struct gcov_info *info;
+
+    for ( info = info_list ; info; info = info->next )
+    {
+        const struct gcov_ctr_info *ctr;
+        int type;
+
+        /* reset counters */
+        ctr = info->counts;
+        for ( type = -1; next_type(info, &type) < XENCOV_COUNTERS; ++ctr )
+            memset(ctr->values, 0, ctr->num * sizeof(ctr->values[0]));
+    }
+
+    return 0;
+}
+
+int sysctl_coverage_op(xen_sysctl_coverage_op_t *op)
+{
+    int ret = -EINVAL;
+    write_iter_t iter;
 
     switch ( op->cmd )
     {
-    case XEN_SYSCTL_GCOV_get_size:
-        op->size = gcov_get_size();
+    case XEN_SYSCTL_COVERAGE_get_total_size:
+        iter.real = 0;
+
+        write_gcov(&iter);
+        op->u.total_size = iter.write_offset;
         ret = 0;
         break;
 
-    case XEN_SYSCTL_GCOV_read:
-    {
-        XEN_GUEST_HANDLE_PARAM(char) buf;
-        uint32_t size = op->size;
+    case XEN_SYSCTL_COVERAGE_read_and_reset:
+    case XEN_SYSCTL_COVERAGE_read:
+        iter.ptr = op->u.raw_info;
+        iter.real = 1;
 
-        buf = guest_handle_cast(op->buffer, char);
+        ret = write_gcov(&iter);
+        if ( ret || op->cmd != XEN_SYSCTL_COVERAGE_read_and_reset )
+            break;
 
-        ret = gcov_dump_all(buf, &size);
-        op->size = size;
-
+        /* fall through */
+    case XEN_SYSCTL_COVERAGE_reset:
+        ret = reset_counters();
         break;
     }
-
-    case XEN_SYSCTL_GCOV_reset:
-        gcov_reset_all_counters();
-        ret = 0;
-        break;
-
-    default:
-        ret = -EINVAL;
-        break;
-    }
-
     return ret;
 }
 

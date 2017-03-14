@@ -47,23 +47,11 @@ static void __init efi_arch_relocate_image(unsigned long delta)
 
     for ( base_relocs = __base_relocs_start; base_relocs < __base_relocs_end; )
     {
-        unsigned int i = 0, n;
+        unsigned int i, n;
 
         n = (base_relocs->size - sizeof(*base_relocs)) /
             sizeof(*base_relocs->entries);
-
-        /*
-         * Relevant l{2,3}_bootmap entries get initialized explicitly in
-         * efi_arch_memory_setup(), so we must not apply relocations there.
-         * l2_identmap's first slot, otoh, should be handled normally, as
-         * efi_arch_memory_setup() won't touch it (xen_phys_start should
-         * never be zero).
-         */
-        if ( xen_phys_start + base_relocs->rva == (unsigned long)l3_bootmap ||
-             xen_phys_start + base_relocs->rva == (unsigned long)l2_bootmap )
-            i = n;
-
-        for ( ; i < n; ++i )
+        for ( i = 0; i < n; ++i )
         {
             unsigned long addr = xen_phys_start + base_relocs->rva +
                                  (base_relocs->entries[i] & 0xfff);
@@ -81,9 +69,12 @@ static void __init efi_arch_relocate_image(unsigned long delta)
                 }
                 break;
             case PE_BASE_RELOC_DIR64:
-                if ( in_page_tables(addr) )
-                    blexit(L"Unexpected relocation type");
-                *(u64 *)addr += delta;
+                if ( delta )
+                {
+                    *(u64 *)addr += delta;
+                    if ( in_page_tables(addr) )
+                        *(intpte_t *)addr += xen_phys_start;
+                }
                 break;
             default:
                 blexit(L"Unsupported relocation type");
@@ -101,10 +92,6 @@ static void __init relocate_trampoline(unsigned long phys)
     const s32 *trampoline_ptr;
 
     trampoline_phys = phys;
-
-    if ( !efi_enabled(EFI_LOADER) )
-        return;
-
     /* Apply relocations to trampoline. */
     for ( trampoline_ptr = __trampoline_rel_start;
           trampoline_ptr < __trampoline_rel_stop;
@@ -118,7 +105,7 @@ static void __init relocate_trampoline(unsigned long phys)
 
 static void __init place_string(u32 *addr, const char *s)
 {
-    char *alloc = NULL;
+    static char *__initdata alloc = start;
 
     if ( s && *s )
     {
@@ -126,7 +113,7 @@ static void __init place_string(u32 *addr, const char *s)
         const char *old = (char *)(long)*addr;
         size_t len2 = *addr ? strlen(old) + 1 : 0;
 
-        alloc = ebmalloc(len1 + len2);
+        alloc -= len1 + len2;
         /*
          * Insert new string before already existing one. This is needed
          * for options passed on the command line to override options from
@@ -209,7 +196,12 @@ static void __init efi_arch_process_memory_map(EFI_SYSTEM_TABLE *SystemTable,
 
 static void *__init efi_arch_allocate_mmap_buffer(UINTN map_size)
 {
-    return ebmalloc(map_size);
+    place_string(&mbi.mem_upper, NULL);
+    mbi.mem_upper -= map_size;
+    mbi.mem_upper &= -__alignof__(EFI_MEMORY_DESCRIPTOR);
+    if ( mbi.mem_upper < xen_phys_start )
+        return NULL;
+    return (void *)(long)mbi.mem_upper;
 }
 
 static void __init efi_arch_pre_exit_boot(void)
@@ -224,7 +216,7 @@ static void __init efi_arch_pre_exit_boot(void)
 
 static void __init noreturn efi_arch_post_exit_boot(void)
 {
-    u64 cr4 = XEN_MINIMAL_CR4 & ~X86_CR4_PGE, efer;
+    u64 efer;
 
     efi_arch_relocate_image(__XEN_VIRT_START - xen_phys_start);
     memcpy((void *)trampoline_phys, trampoline_start, cfg.size);
@@ -233,17 +225,13 @@ static void __init noreturn efi_arch_post_exit_boot(void)
     asm volatile("pushq $0\n\tpopfq");
     rdmsrl(MSR_EFER, efer);
     efer |= EFER_SCE;
-    if ( cpuid_ext_features & cpufeat_mask(X86_FEATURE_NX) )
+    if ( cpuid_ext_features & (1 << (X86_FEATURE_NX & 0x1f)) )
         efer |= EFER_NX;
     wrmsrl(MSR_EFER, efer);
     write_cr0(X86_CR0_PE | X86_CR0_MP | X86_CR0_ET | X86_CR0_NE | X86_CR0_WP |
               X86_CR0_AM | X86_CR0_PG);
     asm volatile ( "mov    %[cr4], %%cr4\n\t"
                    "mov    %[cr3], %%cr3\n\t"
-#if XEN_MINIMAL_CR4 & X86_CR4_PGE
-                   "or     $"__stringify(X86_CR4_PGE)", %[cr4]\n\t"
-                   "mov    %[cr4], %%cr4\n\t"
-#endif
                    "movabs $__start_xen, %[rip]\n\t"
                    "lgdt   gdt_descr(%%rip)\n\t"
                    "mov    stack_start(%%rip), %%rsp\n\t"
@@ -255,9 +243,9 @@ static void __init noreturn efi_arch_post_exit_boot(void)
                    "movl   %[cs], 8(%%rsp)\n\t"
                    "mov    %[rip], (%%rsp)\n\t"
                    "lretq  %[stkoff]-16"
-                   : [rip] "=&r" (efer/* any dead 64-bit variable */),
-                     [cr4] "+&r" (cr4)
+                   : [rip] "=&r" (efer/* any dead 64-bit variable */)
                    : [cr3] "r" (idle_pg_table),
+                     [cr4] "r" (mmu_cr4_features),
                      [cs] "ir" (__HYPERVISOR_CS),
                      [ds] "r" (__HYPERVISOR_DS),
                      [stkoff] "i" (STACK_SIZE - sizeof(struct cpu_info)),
@@ -554,12 +542,7 @@ static void __init efi_arch_memory_setup(void)
 
     /* Allocate space for trampoline (in first Mb). */
     cfg.addr = 0x100000;
-
-    if ( efi_enabled(EFI_LOADER) )
-        cfg.size = trampoline_end - trampoline_start;
-    else
-        cfg.size = TRAMPOLINE_SPACE + TRAMPOLINE_STACK_SPACE;
-
+    cfg.size = trampoline_end - trampoline_start;
     status = efi_bs->AllocatePages(AllocateMaxAddress, EfiLoaderData,
                                    PFN_UP(cfg.size), &cfg.addr);
     if ( status == EFI_SUCCESS )
@@ -569,9 +552,6 @@ static void __init efi_arch_memory_setup(void)
         cfg.addr = 0;
         PrintStr(L"Trampoline space cannot be allocated; will try fallback.\r\n");
     }
-
-    if ( !efi_enabled(EFI_LOADER) )
-        return;
 
     /* Initialise L2 identity-map and boot-map page table entries (16MB). */
     for ( i = 0; i < 8; ++i )
@@ -625,13 +605,10 @@ static void __init efi_arch_handle_module(struct file *file, const CHAR16 *name,
 
 static void __init efi_arch_cpu(void)
 {
-    uint32_t eax = cpuid_eax(0x80000000);
-
-    if ( (eax >> 16) == 0x8000 && eax > 0x80000000 )
+    if ( cpuid_eax(0x80000000) > 0x80000000 )
     {
         cpuid_ext_features = cpuid_edx(0x80000001);
-        boot_cpu_data.x86_capability[cpufeat_word(X86_FEATURE_SYSCALL)]
-            = cpuid_ext_features;
+        boot_cpu_data.x86_capability[1] = cpuid_ext_features;
     }
 }
 
@@ -664,41 +641,6 @@ static bool_t __init efi_arch_use_config_file(EFI_SYSTEM_TABLE *SystemTable)
 }
 
 static void efi_arch_flush_dcache_area(const void *vaddr, UINTN size) { }
-
-void __init efi_multiboot2(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
-{
-    EFI_GRAPHICS_OUTPUT_PROTOCOL *gop;
-    UINTN cols, gop_mode = ~0, rows;
-
-    __set_bit(EFI_BOOT, &efi_flags);
-    __set_bit(EFI_RS, &efi_flags);
-
-    efi_init(ImageHandle, SystemTable);
-
-    efi_console_set_mode();
-
-    if ( StdOut->QueryMode(StdOut, StdOut->Mode->Mode,
-                           &cols, &rows) == EFI_SUCCESS )
-        efi_arch_console_init(cols, rows);
-
-    gop = efi_get_gop();
-
-    if ( gop )
-        gop_mode = efi_find_gop_mode(gop, 0, 0, 0);
-
-    efi_arch_edd();
-    efi_arch_cpu();
-
-    efi_tables();
-    setup_efi_pci();
-    efi_variables();
-    efi_arch_memory_setup();
-
-    if ( gop )
-        efi_set_gop_mode(gop, gop_mode);
-
-    efi_exit_boot(ImageHandle, SystemTable);
-}
 
 /*
  * Local variables:

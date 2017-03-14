@@ -39,6 +39,7 @@ vhd_util_query(int argc, char **argv)
 	vhd_context_t vhd;
 	off_t currsize;
 	int ret, err, c, size, physize, parent, fields, depth;
+	int marker, allocated;
 
 	name    = NULL;
 	size    = 0;
@@ -46,6 +47,8 @@ vhd_util_query(int argc, char **argv)
 	parent  = 0;
 	fields  = 0;
 	depth   = 0;
+	marker  = 0;
+	allocated = 0;
 
 	if (!argc || !argv) {
 		err = -EINVAL;
@@ -53,7 +56,7 @@ vhd_util_query(int argc, char **argv)
 	}
 
 	optind = 0;
-	while ((c = getopt(argc, argv, "n:vspfdh")) != -1) {
+	while ((c = getopt(argc, argv, "n:vspfdmah")) != -1) {
 		switch (c) {
 		case 'n':
 			name = optarg;
@@ -72,6 +75,12 @@ vhd_util_query(int argc, char **argv)
 			break;
 		case 'd':
 			depth = 1;
+			break;
+		case 'm':
+			marker = 1;
+			break;
+		case 'a':
+			allocated = 1;
 			break;
 		case 'h':
 			err = 0;
@@ -136,6 +145,18 @@ vhd_util_query(int argc, char **argv)
 		err = (err ? : ret);
 	}
 
+	if (marker) {
+		char marker;
+
+		ret = vhd_marker(&vhd, &marker);
+		if (ret)
+			printf("error checking 'marker' field: %d\n", ret);
+		else
+			printf("marker: %d\n", marker);
+
+		err = (err ? : ret);
+	}
+
 	if (depth) {
 		int length;
 
@@ -147,6 +168,23 @@ vhd_util_query(int argc, char **argv)
 
 		err = (err ? : ret);
 	}
+
+	if (allocated) {
+		ret = vhd_get_bat(&vhd);
+		if (ret)
+			printf("error reading bat: %d\n", ret);
+		else {
+			uint32_t i, used;
+
+			for (i = 0, used = 0; i < vhd.bat.entries; i++)
+				if (vhd.bat.bat[i] != DD_BLK_UNUSED)
+					used++;
+
+			printf("%u\n", used);
+		}
+
+		err = (err ? : ret);
+	}
 		
 	vhd_close(&vhd);
 	return err;
@@ -154,6 +192,7 @@ vhd_util_query(int argc, char **argv)
 usage:
 	printf("options: <-n name> [-v print virtual size (in MB)] "
 	       "[-s print physical utilization (bytes)] [-p print parent] "
-	       "[-f print fields] [-d print chain depth] [-h help]\n");
+	       "[-f print fields] [-m print marker] [-d print chain depth] "
+	       "[-a print allocated block count] [-h help]\n");
 	return err;
 }

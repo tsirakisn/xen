@@ -4,6 +4,7 @@
  * Copyright (c) 2012, Citrix Systems
  */
 
+#include <xen/config.h>
 #include <xen/types.h>
 #include <xen/lib.h>
 #include <xen/errno.h>
@@ -12,13 +13,6 @@
 #include <xen/iocap.h>
 #include <xsm/xsm.h>
 #include <public/domctl.h>
-
-void arch_get_domain_info(const struct domain *d,
-                          struct xen_domctl_getdomaininfo *info)
-{
-    /* All ARM domains use hardware assisted paging. */
-    info->flags |= XEN_DOMINF_hap;
-}
 
 long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
                     XEN_GUEST_HANDLE_PARAM(xen_domctl_t) u_domctl)
@@ -36,7 +30,7 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
         if ( e < s )
             return -EINVAL;
 
-        return p2m_cache_flush(d, _gfn(s), domctl->u.cacheflush.nr_pfns);
+        return p2m_cache_flush(d, s, e);
     }
     case XEN_DOMCTL_bind_pt_irq:
     {
@@ -114,11 +108,6 @@ long arch_do_domctl(struct xen_domctl *domctl, struct domain *d,
 
         return 0;
     }
-
-    case XEN_DOMCTL_disable_migrate:
-        d->disable_migrate = domctl->u.disable_migrate.disable;
-        return 0;
-
     default:
     {
         int rc;
