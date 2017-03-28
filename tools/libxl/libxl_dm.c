@@ -1445,7 +1445,11 @@ void libxl__spawn_stub_dm(libxl__egc *egc, libxl__stub_dm_spawn_state *sdss)
     libxl_domain_build_info_init(&dm_config->b_info);
     libxl_domain_build_info_init_type(&dm_config->b_info, LIBXL_DOMAIN_TYPE_PV);
 
-    dm_config->b_info.max_vcpus = 1;
+    dm_config->b_info.max_vcpus = guest_config->b_info.max_vcpus;
+    dm_config->b_info.avail_vcpus = guest_config->b_info.avail_vcpus;
+    dm_config->b_info.vnuma_nodes = guest_config->b_info.vnuma_nodes;
+    dm_config->b_info.cpumap = guest_config->b_info.cpumap;
+
     switch (guest_config->b_info.stubdomain_version) {
     case LIBXL_STUBDOMAIN_VERSION_MINIOS:
         dm_config->b_info.max_memkb = 28 * 1024;
